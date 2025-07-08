@@ -1,5 +1,3 @@
-local M = {}
-
 local supported_format = { -- only supports * from regex
 	-- copied and expanded from archive.lua
 	"application/zip",
@@ -19,18 +17,11 @@ local supported_format = { -- only supports * from regex
 	"application/ms-cab*",
 }
 
+-- UTILS --
+
 local function get_tmp_dir()
 	return os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
 end
-
-local get_cache = ya.sync(function(st, url)
-	if st.cache_archive == nil then
-		st.cache_archive = {}
-		return nil
-	end
-
-	return st.cache_archive[url]
-end)
 
 local function get_yazip_dir()
 	return get_tmp_dir() .. "/yazip"
@@ -58,81 +49,12 @@ local function random_string(length)
 	return res
 end
 
-local set_session_id = ya.sync(function(st, id)
-	st.session_id = id
-end)
-
-local state = ya.sync(function(st)
-	local h = cx.active.current.hovered
-	local selected = {}
-	for i, url in pairs(cx.active.selected) do
-		selected[i] = tostring(url)
-	end
-
-	if h == nil then
-		return {}
-	end
-
-	return {
-		mime = h:mime(),
-		hovered_path = tostring(h.url),
-		cwd_path = tostring(cx.active.current.cwd),
-		active_tab = cx.tabs.idx,
-		session_id = st.session_id,
-		selected = selected,
-	}
-end)
-
-local cache_archive = ya.sync(function(st, url, tmp_path)
-	if st.cache_archive == nil then
-		st.cache_archive = {}
-	end
-
-	st.cache_archive[url] = tmp_path
-end)
-
--- local get_all_cache = ya.sync(function(st)
--- 	if st.cache_archive == nil then
--- 		st.cache_archive = {}
--- 		return {}
--- 	end
---
--- 	local out = {}
--- 	for _, url in ipairs(st.cache_archive) do
--- 		out[#out + 1] = url
--- 	end
---
--- 	return out
--- end)
-
-local set_opened_archive = ya.sync(function(st, url, tab)
-	if st.opened_archive == nil then
-		st.opened_archive = {}
-	end
-
-	st.opened_archive[tab] = url
-end)
-
-local get_opened_archive = ya.sync(function(st, tab)
-	if st.opened_archive == nil then
-		return nil
-	end
-
-	return st.opened_archive[tab]
-end)
-
-local function copy_file_parts(file)
+local function copy_file_parts(file, is_hovered)
 	local kind = 0
 	-- TODO: handle windowsOS files
 	local chakind = { file.is_dir, file.is_hidden, file.is_link, file.is_orphan, file.is_dummy } -- unix
 	for i, condition in ipairs(chakind) do
 		kind = kind | (condition and 1 << (i - 1))
-	end
-
-	-- highlight the archive file
-	local is_hovered = false
-	if get_opened_archive(cx.tabs.idx) == tostring(file.url) then
-		is_hovered = true
 	end
 
 	return {
@@ -191,10 +113,76 @@ local function assemble_file_parts(parts)
 	return f
 end
 
+-- ya.sync --
+
+local get_cache = ya.sync(function(st, url)
+	if st.cache_archive == nil then
+		st.cache_archive = {}
+		return nil
+	end
+
+	return st.cache_archive[url]
+end)
+
+local set_session_id = ya.sync(function(st, id)
+	st.session_id = id
+end)
+
+local state = ya.sync(function(st)
+	local h = cx.active.current.hovered
+	local selected = {}
+	for i, url in pairs(cx.active.selected) do
+		selected[i] = tostring(url)
+	end
+
+	if h == nil then
+		return {}
+	end
+
+	return {
+		mime = h:mime(),
+		hovered_path = tostring(h.url),
+		cwd_path = tostring(cx.active.current.cwd),
+		active_tab = cx.tabs.idx,
+		session_id = st.session_id,
+		selected = selected,
+	}
+end)
+
+local cache_archive = ya.sync(function(st, url, tmp_path)
+	if st.cache_archive == nil then
+		st.cache_archive = {}
+	end
+
+	st.cache_archive[url] = tmp_path
+end)
+
+local set_opened_archive = ya.sync(function(st, url, tab)
+	if st.opened_archive == nil then
+		st.opened_archive = {}
+	end
+
+	st.opened_archive[tab] = url
+end)
+
+local get_opened_archive = ya.sync(function(st, tab)
+	if st.opened_archive == nil then
+		return nil
+	end
+
+	return st.opened_archive[tab]
+end)
+
+
 local save_parent_window = ya.sync(function(st)
 	local parent_window = {}
 	for i, file in ipairs(cx.active.current.window) do
-		parent_window[i] = copy_file_parts(file)
+		-- highlight the archive file
+		local is_hovered = false
+		if get_opened_archive(cx.tabs.idx) == tostring(file.url) then
+			is_hovered = true
+		end
+		parent_window[i] = copy_file_parts(file, is_hovered)
 	end
 
 	st.parent_window = parent_window
@@ -203,6 +191,8 @@ end)
 local get_parent_window = ya.sync(function(st)
 	return st.parent_window
 end)
+
+-- helper functions --
 
 local function two_deep(archive_path, cwd)
 	local tmp_path = get_cache(archive_path)
@@ -281,7 +271,7 @@ end
 local function list_paths(args)
 	local child = spawn_7z({ "l", "-ba", "-slt", "-sccUTF-8", table.unpack(args) })
 	if not child then
-		return {}, 0, 1
+		return {}, 0
 	end
 
 	local i, paths, code = 0, { { path = "", size = 0, attr = "" } }, 0
@@ -326,17 +316,6 @@ local function list_paths(args)
 end
 
 local function is_yazip_path(path)
-	-- local all_yazip = get_all_cache()
-	-- ya.dbg("all yazip", all_yazip)
-	-- for _, tmp_url in ipairs(all_yazip) do
-	-- 	ya.dbg("is yazip path", tmp_url)
-	-- 	if path:sub(1, #tmp_url) == tmp_url then
-	-- 		return true
-	-- 	end
-	-- end
-	--
-	-- return false
-
 	local yazip_path = get_yazip_dir()
 	return path:sub(1, #yazip_path) == yazip_path
 end
@@ -371,6 +350,8 @@ local function notify(msg, level)
 	   level = level,
 	 }
 end
+
+-- commands --
 
 local function extract_hovered_selected()
 	local st = state()
@@ -423,6 +404,9 @@ local function handle_commands(args)
 		end
 	end
 end
+
+-- yazi entries --
+local M = {}
 
 function M:entry(job)
 	local st = state()
