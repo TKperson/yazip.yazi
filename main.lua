@@ -427,6 +427,8 @@ function M:setup()
 			local parent = cx.active:history(url)
 			if parent then
 				tab = { parent = parent }
+			else
+				ya.err("Unable to render the correct parent window")
 			end
 		end
 
@@ -436,6 +438,7 @@ function M:setup()
 	ps.sub("cd", function(job)
 		local st = state()
 
+		-- exit
 		if st.cwd_path == get_yazip_dir() then
 			local archive_path = Url(get_opened_archive(job.tab))
 			if archive_path ~= nil then
@@ -463,6 +466,8 @@ function M:fetch(job)
 			goto continue
 		end
 
+		-- TODO: file.cha.len == 0 includes empty files 
+		-- maybe keep track of files that have been extracted
 		if file.cha.len == 0 and is_yazip_path(tostring(file.url)) then
 			updates[tostring(file.url)], st[i] = "yazip/file", true
 		else
