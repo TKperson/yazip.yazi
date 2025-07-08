@@ -49,70 +49,6 @@ local function random_string(length)
 	return res
 end
 
-local function copy_file_parts(file, is_hovered)
-	local kind = 0
-	-- TODO: handle windowsOS files
-	local chakind = { file.is_dir, file.is_hidden, file.is_link, file.is_orphan, file.is_dummy } -- unix
-	for i, condition in ipairs(chakind) do
-		kind = kind | (condition and 1 << (i - 1))
-	end
-
-	return {
-		url = tostring(file.url),
-		cha = { -- NOTE: unix only currently
-			kind = kind,
-			len = file.cha.len,
-			atime = file.cha.atime,
-			btime = file.cha.btime,
-			ctime = file.cha.ctime,
-			mtime = file.cha.mtime,
-			mode = file.cha.mode,
-			dev = file.cha.dev,
-			uid = file.cha.uid,
-			gid = file.cha.gid,
-			nlink = file.cha.nlink,
-		},
-		highlights = file:highlights(),
-		style = file:style(),
-		icon = file:icon(),
-		found = file:found(),
-		is_hovered = is_hovered,
-	}
-end
-
-local function assemble_file_parts(parts)
-	-- very hacky workaround
-	local f = {}
-	f.inner = File({
-		url = Url(parts.url),
-		cha = Cha(parts.cha),
-	})
-	f.name = f.inner.name
-	f.is_hovered = parts.is_hovered
-	f.link_to = f.inner.link_to
-	f.in_preview = f.inner.in_preview
-	f.cha = f.inner.cha
-	f.url = f.inner.url
-	function f:prefix()
-		return ""
-	end
-	function f:icon()
-		return parts.icon
-	end
-	function f:found()
-		return parts.found
-	end
-	function f:style()
-		return parts.style
-	end
-	function f:highlights()
-		-- return parts.highlights
-		-- not needed
-		return nil
-	end
-	return f
-end
-
 -- ya.sync --
 
 local get_cache = ya.sync(function(st, url)
@@ -122,10 +58,6 @@ local get_cache = ya.sync(function(st, url)
 	end
 
 	return st.cache_archive[url]
-end)
-
-local set_session_id = ya.sync(function(st, id)
-	st.session_id = id
 end)
 
 local state = ya.sync(function(st)
@@ -144,7 +76,6 @@ local state = ya.sync(function(st)
 		hovered_path = tostring(h.url),
 		cwd_path = tostring(cx.active.current.cwd),
 		active_tab = cx.tabs.idx,
-		session_id = st.session_id,
 		selected = selected,
 	}
 end)
@@ -171,25 +102,6 @@ local get_opened_archive = ya.sync(function(st, tab)
 	end
 
 	return st.opened_archive[tab]
-end)
-
-
-local save_parent_window = ya.sync(function(st)
-	local parent_window = {}
-	for i, file in ipairs(cx.active.current.window) do
-		-- highlight the archive file
-		local is_hovered = false
-		if get_opened_archive(cx.tabs.idx) == tostring(file.url) then
-			is_hovered = true
-		end
-		parent_window[i] = copy_file_parts(file, is_hovered)
-	end
-
-	st.parent_window = parent_window
-end)
-
-local get_parent_window = ya.sync(function(st)
-	return st.parent_window
 end)
 
 -- helper functions --
@@ -339,16 +251,16 @@ local function notify(msg, level)
 		level = "info"
 	end
 
-	 ya.notify {
-	   -- Title.
-	   title = "Yazip",
-	   -- Content.
-	   content = msg,
-	   -- Timeout.
-	   timeout = 6.5,
-	   -- Level, available values: "info", "warn", and "error", default is "info".
-	   level = level,
-	 }
+	ya.notify {
+	  -- Title.
+	  title = "Yazip",
+	  -- Content.
+	  content = msg,
+	  -- Timeout.
+	  timeout = 6.5,
+	  -- Level, available values: "info", "warn", and "error", default is "info".
+	  level = level,
+	}
 end
 
 -- commands --
@@ -430,7 +342,6 @@ function M:entry(job)
 		local tmp_url = get_cache(st.hovered_path) or get_yazip_dir() .. "/" .. random_string(8)
 		cache_archive(st.hovered_path, tmp_url)
 		set_opened_archive(st.hovered_path, st.active_tab)
-		save_parent_window()
 
 		local ok, err = fs.create("dir_all", Url(tmp_url))
 		if not ok then
@@ -472,9 +383,6 @@ function M:entry(job)
 end
 
 function M:setup()
-	ya.dbg("lmao", Folder)
-	set_session_id(random_string(5))
-
 	Header.cwd = function(self)
 		local max = self._area.w - self._right_width
 		if max <= 0 then
@@ -508,34 +416,21 @@ function M:setup()
 		return ui.Span(s):fg("#ECA517")
 	end, 1100, Header.LEFT)
 
-	Parent.redraw = function(self)
-		if not self._folder then
-			return {}
-		end
-
+	local old_new = Parent.new
+	function Parent:new(area, tab)
 		local archive_path = get_opened_archive(cx.tabs.idx)
 		local cwd_path = tostring(cx.active.current.cwd)
-		local window = {}
 
 		if is_yazip_path(cwd_path) and archive_path ~= nil and not two_deep(archive_path, cwd_path) then
-			local parent_window = get_parent_window()
-			for i, parts in ipairs(parent_window) do
-				window[i] = assemble_file_parts(parts)
+			local archive_name = Url(archive_path).name
+			local url = Url(archive_path:sub(1, #archive_path - #archive_name))
+			local parent = cx.active:history(url)
+			if parent then
+				tab = { parent = parent }
 			end
-		else
-			window = self._folder.window
 		end
 
-		local items = {}
-		for _, f in ipairs(window) do
-			local entity = Entity:new(f)
-			items[#items + 1] = entity:redraw():truncate({
-				max = self._area.w,
-				ellipsis = entity:ellipsis(self._area.w),
-			})
-		end
-
-		return ui.List(items):area(self._area)
+		return old_new(self, area, tab)
 	end
 
 	ps.sub("cd", function(job)
