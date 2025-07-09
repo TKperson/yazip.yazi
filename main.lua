@@ -19,6 +19,8 @@ local supported_format = { -- only supports * from regex
 
 -- UTILS --
 
+local function fail(s, ...) error(string.format(s, ...)) end
+
 local function get_tmp_dir()
 	return os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
 end
@@ -51,15 +53,6 @@ end
 
 -- ya.sync --
 
-local get_cache = ya.sync(function(st, url)
-	if st.cache_archive == nil then
-		st.cache_archive = {}
-		return nil
-	end
-
-	return st.cache_archive[url]
-end)
-
 local state = ya.sync(function(st)
 	local h = cx.active.current.hovered
 	local selected = {}
@@ -80,12 +73,22 @@ local state = ya.sync(function(st)
 	}
 end)
 
-local cache_archive = ya.sync(function(st, url, tmp_path)
+local cache_archive = ya.sync(function(st, archive_path, tmp_path)
 	if st.cache_archive == nil then
 		st.cache_archive = {}
 	end
 
-	st.cache_archive[url] = tmp_path
+	-- tostring(Url(string)) to clone
+	st.cache_archive[archive_path] = tmp_path
+end)
+
+local get_cache = ya.sync(function(st, url)
+	if st.cache_archive == nil then
+		st.cache_archive = {}
+		return nil
+	end
+
+	return st.cache_archive[url]
 end)
 
 local set_opened_archive = ya.sync(function(st, url, tab)
@@ -150,28 +153,6 @@ local is_supported = function(mime)
 	return false
 end
 
-local function is_encrypted(s)
-	return s:find(" Wrong password", 1, true)
-end
-
-local function spawn_7z(args)
-	local last_err = nil
-	local try = function(name)
-		local stdout = args[1] == "l" and Command.PIPED or Command.NULL
-		local child, err = Command(name):arg(args):stdout(stdout):stderr(Command.PIPED):spawn()
-		if not child then
-			last_err = err
-		end
-		return child
-	end
-
-	local child = try("7zz") or try("7z")
-	if not child then
-		return ya.err("Failed to start both `7zz` and `7z`, error: " .. last_err)
-	end
-	return child, last_err
-end
-
 ---List files in an archive
 ---@param args table
 ---@return table files
@@ -181,7 +162,8 @@ end
 ---  2: wrong password
 ---  3: partial success
 local function list_paths(args)
-	local child = spawn_7z({ "l", "-ba", "-slt", "-sccUTF-8", table.unpack(args) })
+	local archive = require("archive")
+	local child = archive.spawn_7z({ "l", "-ba", "-slt", "-sccUTF-8", table.unpack(args) })
 	if not child then
 		return {}, 0
 	end
@@ -190,7 +172,7 @@ local function list_paths(args)
 	local key, value = "", ""
 	while true do
 		local next, event = child:read_line()
-		if event == 1 and is_encrypted(next) then
+		if event == 1 and archive.is_encrypted(next) then
 			code = 2
 			break
 		elseif event == 1 then
@@ -232,20 +214,6 @@ local function is_yazip_path(path)
 	return path:sub(1, #yazip_path) == yazip_path
 end
 
-local function extract_all()
-	local st = state()
-	local archive_path = get_opened_archive(st.active_tab)
-	local yazip_path = get_cache(archive_path)
-	local child, err = spawn_7z({ "x", archive_path, "-o" .. yazip_path, "-y" })
-	if err ~= nil then
-		ya.err("Unable to create a 7zip process", err)
-	end
-	local status, err = child:wait()
-	if err ~= nil then
-		ya.err("Failed to extract this archive with 7zip", status, err)
-	end
-end
-
 local function notify(msg, level)
 	if level == nil then
 		level = "info"
@@ -263,7 +231,60 @@ local function notify(msg, level)
 	}
 end
 
+local extract = {}
+
+function extract:entry(from, to, args)
+	local pwd = ""
+	while true do
+		if not extract:try_with(Url(from), pwd, Url(to), args) then
+			break
+		end
+
+		local value, event = ya.input {
+			position = { "center", w = 50 },
+			title = string.format('Password for "%s":', Url(from).name),
+			obscure = true,
+		}
+		if event == 1 then
+			pwd = value
+		else
+			break
+		end
+	end
+end
+
+function extract:try_with(from, pwd, to, args)
+	if not to then
+		fail("Invalid URL '%s'", from)
+	end
+
+	local archive = require("archive")
+	local child, err = archive.spawn_7z { "x", "-aoa", "-sccUTF-8", "-p" .. pwd, "-o" .. tostring(to), tostring(from), table.unpack(args) }
+	if not child then
+		fail("Failed to start either `7zz` or `7z`, error: " .. err)
+	end
+
+	local output, err = child:wait_with_output()
+	if output and output.status.code == 2 and archive.is_encrypted(output.stderr) then
+		return true -- Need to retry
+	end
+
+	if not output then
+		fail("7zip failed to output when extracting '%s', error: %s", from, err)
+	elseif output.status.code ~= 0 then
+		fail("7zip exited when extracting '%s', error code %s", from, output.status.code)
+	end
+end
+
 -- commands --
+local function extract_all()
+	local st = state()
+	local archive_path = get_opened_archive(st.active_tab)
+	local yazip_path = get_cache(archive_path)
+	extract:entry(archive_path, yazip_path, {})
+
+	notify("Finished extracting all archive files")
+end
 
 local function extract_hovered_selected()
 	local st = state()
@@ -273,7 +294,14 @@ local function extract_hovered_selected()
 
 	local warning = false
 
-	for _, path in ipairs(st.selected) do
+	local paths = { st.hovered_path }
+	local finish_msg = "Extracted the hovered item"
+	if #st.selected ~= 0 then
+		paths = st.selected
+		finish_msg = "Extracted the selected item(s)"
+	end
+
+	for _, path in ipairs(paths) do
 		if not is_yazip_path(path) then
 			warning = true
 			goto continue
@@ -287,30 +315,15 @@ local function extract_hovered_selected()
 		notify("Non-yazip files in the selection are ignored", "warn")
 	end
 
-	local child, err = spawn_7z({ "e", table.unpack(selected_relative), "-o" .. yazip_path, "-y" })
-	if err ~= nil then
-		ya.err("Unable to create a 7zip process", err)
-	end
-	local status, err = child:wait()
-	if err ~= nil then
-		ya.err("Failed to extract this archive with 7zip", status, err)
-	end
+	extract:entry(archive_path, yazip_path, selected_relative)
+
+	notify(finish_msg)
 end
 
 local function handle_commands(args)
 	if args[1] == "extract" then
 		if args.all then
 			extract_all()
-			ya.notify({
-				-- Title.
-				title = "Yazip",
-				-- Content.
-				content = "Finished extracting all",
-				-- Timeout.
-				timeout = 6.5,
-				-- Level, available values: "info", "warn", and "error", default is "info".
-				level = "info",
-			})
 		elseif args.hovered_selected then
 			extract_hovered_selected()
 		end
@@ -330,20 +343,43 @@ function M:entry(job)
 
 	if is_supported(st.mime) then
 		ya.dbg("Opening archive")
-		local paths, code = list_paths({ "-p", st.hovered_path })
-		if code ~= 0 then
-			return require("empty").msg(
-				job,
-				code == 2 and "File list in this archive is encrypted"
-					or "Failed to start both `7zz` and `7z`. Do you have 7-zip installed?"
-			)
+		local pwd = ""
+		local paths
+		while true do
+			local code
+			paths, code = list_paths({ "-p"..pwd, st.hovered_path })
+			ya.dbg("fucking paths", paths)
+			if code == 0 then
+				break
+			end
+
+			if code == 2 then
+				notify("File list in this archive is encrypted")
+
+				local value, event = ya.input{
+					title = string.format('Password for "%s":', Url(st.hovered_path).name),
+					position = { "center", w = 50 },
+					obscure = false,
+				}
+
+				ya.dbg("fucking event", event)
+
+				if event == 1 then
+					pwd = value
+				else
+					return
+				end
+			else
+				notify("Failed to start both `7zz` and `7z`. Do you have 7-zip installed?", "error")
+			end
 		end
 
-		local tmp_url = get_cache(st.hovered_path) or get_yazip_dir() .. "/" .. random_string(8)
-		cache_archive(st.hovered_path, tmp_url)
+		local yazip_path = get_cache(st.hovered_path)
+		local tmp_url = (yazip_path and Url(yazip_path)) or Url(get_yazip_dir()):join(random_string(8))
+		cache_archive(st.hovered_path, tostring(tmp_url))
 		set_opened_archive(st.hovered_path, st.active_tab)
 
-		local ok, err = fs.create("dir_all", Url(tmp_url))
+		local ok, err = fs.create("dir_all", tmp_url)
 		if not ok then
 			ya.err("Unable to create " .. tmp_url, err)
 			return
@@ -356,15 +392,15 @@ function M:entry(job)
 		for _, path in ipairs(paths) do
 			if is_dir(path) then
 				-- create dir
-				ok, err = fs.create("dir_all", Url(tmp_url .. "/" .. path.path))
+				ok, err = fs.create("dir_all", tmp_url:join(path.path))
 				if not ok then
 					ya.err("Unable to create directory" .. tostring(tmp_url), err)
 					return
 				end
 			else
 				-- create empty file
-				local file_path = tmp_url .. "/" .. path.path
-				local file, err = io.open(file_path, "w")
+				local file_path = tmp_url:join(path.path)
+				local file, err = io.open(tostring(file_path), "w")
 
 				if file then
 					file:close()
@@ -375,7 +411,7 @@ function M:entry(job)
 			end
 		end
 
-		ya.emit("cd", { Url(tmp_url), raw = true })
+		ya.emit("cd", { tmp_url, raw = true })
 	else
 		-- use default behavior when not hovering over a supported archive file
 		ya.emit("enter", {})

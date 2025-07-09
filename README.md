@@ -5,5 +5,5 @@ if they were directories.
 
 Still WIP
 
-Only previewing archive files are working. Encrypted archives and opening
-nested archives are not supported yet.
+Only previewing archive files are working. Opening and editing nested archives
+is not supported yet.
