@@ -51,7 +51,7 @@ end
 
 -- ya.sync --
 
-local state = ya.sync(function(st)
+local current_state = ya.sync(function(st)
 	local h = cx.active.current.hovered
 	local selected = {}
 	for i, url in pairs(cx.active.selected) do
@@ -71,30 +71,29 @@ local state = ya.sync(function(st)
 	}
 end)
 
-local cache_archive = ya.sync(function(st, archive_path, tmp_path)
-	if st.cache_archive == nil then
-		st.cache_archive = {}
+local set_tmp_path = ya.sync(function(st, archive_path, tmp_path)
+	if st.tmp_paths == nil then
+		st.tmp_paths = {}
 	end
 
-	-- tostring(Url(string)) to clone
-	st.cache_archive[archive_path] = tmp_path
+	st.tmp_paths[archive_path] = tmp_path
 end)
 
-local get_cache = ya.sync(function(st, url)
-	if st.cache_archive == nil then
-		st.cache_archive = {}
+local get_tmp_path = ya.sync(function(st, archive_path)
+	if st.tmp_paths == nil then
+		st.tmp_paths = {}
 		return nil
 	end
 
-	return st.cache_archive[url]
+	return st.tmp_paths[archive_path]
 end)
 
-local set_opened_archive = ya.sync(function(st, url, tab)
+local set_opened_archive = ya.sync(function(st, archive_path, tab)
 	if st.opened_archive == nil then
 		st.opened_archive = {}
 	end
 
-	st.opened_archive[tab] = url
+	st.opened_archive[tab] = archive_path
 end)
 
 local get_opened_archive = ya.sync(function(st, tab)
@@ -105,10 +104,26 @@ local get_opened_archive = ya.sync(function(st, tab)
 	return st.opened_archive[tab]
 end)
 
+local set_extracted_files = ya.sync(function(st, archive_path, extracted_files)
+	if st.extracted_files == nil then
+		st.extracted_files = {}
+	end
+
+	st.extracted_files[archive_path] = extracted_files
+end)
+
+local get_extracted_files = ya.sync(function(st, archive_path)
+	if st.extracted_files == nil then
+		return nil
+	end
+
+	return st.extracted_files[archive_path]
+end)
+
 -- helper functions --
 
 local function two_deep(archive_path, cwd)
-	local tmp_path = get_cache(archive_path)
+	local tmp_path = get_tmp_path(archive_path)
 	local inner_path = cwd:sub(#tmp_path + 1, #cwd)
 	return inner_path:find("/") ~= nil
 end
@@ -269,18 +284,18 @@ end
 
 -- commands --
 local function extract_all()
-	local st = state()
+	local st = current_state()
 	local archive_path = get_opened_archive(st.active_tab)
-	local yazip_path = get_cache(archive_path)
+	local yazip_path = get_tmp_path(archive_path)
 	extract:entry(archive_path, yazip_path, {})
 
 	notify("Finished extracting all archive files")
 end
 
 local function extract_hovered_selected()
-	local st = state()
+	local st = current_state()
 	local archive_path = get_opened_archive(st.active_tab)
-	local yazip_path = get_cache(archive_path)
+	local yazip_path = get_tmp_path(archive_path)
 	local selected_relative = {}
 
 	local warning = false
@@ -319,10 +334,10 @@ local function handle_commands(args, st)
 			extract_hovered_selected()
 		end
 	elseif args[1] == "quit" then
-		local archive_path = get_cache(st.active_tab)
+		local archive_path = get_opened_archive(st.active_tab)
 		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
-			local archive_cwd = Url(archive_path).name
-			ya.emit("cd", { archive_cwd })
+			local archive_cwd = Url(archive_path).parent
+			ya.emit("cd", { tostring(archive_cwd) })
 		end
 
 		if args.no_cwd_file then
@@ -337,7 +352,7 @@ end
 local M = {}
 
 function M:entry(job)
-	local st = state()
+	local st = current_state()
 
 	if next(job.args) ~= nil then
 		handle_commands(job.args, st)
@@ -372,9 +387,9 @@ function M:entry(job)
 			end
 		end
 
-		local yazip_path = get_cache(st.hovered_path)
+		local yazip_path = get_tmp_path(st.hovered_path)
 		local tmp_url = (yazip_path and Url(yazip_path)) or Url(get_yazip_dir()):join(random_string(8))
-		cache_archive(st.hovered_path, tostring(tmp_url))
+		set_tmp_path(st.hovered_path, tostring(tmp_url))
 		set_opened_archive(st.hovered_path, st.active_tab)
 
 		local ok, err = fs.create("dir_all", tmp_url)
@@ -443,7 +458,7 @@ function M:setup()
 				s = "  " .. self:flags()
 			else
 				local h_url = tostring(self._current.hovered.url)
-				local inner_archive_path = h_url:sub(#get_cache(archive_path) + 2, #h_url)
+				local inner_archive_path = h_url:sub(#get_tmp_path(archive_path) + 2, #h_url)
 				s = "  " .. inner_archive_path .. self:flags()
 			end
 		end
@@ -470,7 +485,7 @@ function M:setup()
 	end
 
 	ps.sub("cd", function(job)
-		local st = state()
+		local st = current_state()
 
 		-- exit
 		if st.cwd_path == get_yazip_dir() then
