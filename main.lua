@@ -104,20 +104,25 @@ local get_opened_archive = ya.sync(function(st, tab)
 	return st.opened_archive[tab]
 end)
 
-local set_extracted_files = ya.sync(function(st, archive_path, extracted_files)
+local set_extracted_files = ya.sync(function(st, archive_path, extracted_files, order)
 	if st.extracted_files == nil then
 		st.extracted_files = {}
 	end
 
+	if st.extracted_files_order == nil then
+		st.extracted_files_order = {}
+	end
+
 	st.extracted_files[archive_path] = extracted_files
+	st.extracted_files_order[archive_path] = order
 end)
 
 local get_extracted_files = ya.sync(function(st, archive_path)
 	if st.extracted_files == nil then
-		return nil
+		return {}
 	end
 
-	return st.extracted_files[archive_path]
+	return { st.extracted_files[archive_path], st.extracted_files_order[archive_path] }
 end)
 
 -- helper functions --
@@ -181,7 +186,7 @@ local function list_paths(args)
 		return {}, 0
 	end
 
-	local i, paths, code = 0, { { path = "", size = 0, attr = "" } }, 0
+	local current_path, paths, order, code = nil, {}, {}, 0
 	local key, value = "", ""
 	while true do
 		local next, event = child:read_line()
@@ -196,30 +201,25 @@ local function list_paths(args)
 		end
 
 		if next == "\n" or next == "\r\n" then
-			i = i + 1
-			if paths[#paths].path ~= "" then
-				paths[#paths + 1] = { path = "", size = 0, attr = "" }
-			end
 			goto continue
 		end
 
 		key, value = next:match("^(%u%l+) = (.-)[\r\n]+")
 		if key == "Path" then
-			paths[#paths].path = value
+			current_path = value
+			paths[current_path] = { size = 0, attr = "", extracted = false, listed = false }
+			order[#order + 1] = current_path
 		elseif key == "Size" then
-			paths[#paths].size = tonumber(value) or 0
+			paths[current_path].size = tonumber(value) or 0
 		elseif key == "Attributes" then
-			paths[#paths].attr = value
+			paths[current_path].attr = value
 		end
 
 		::continue::
 	end
 	child:start_kill()
 
-	if paths[#paths].path == "" then
-		paths[#paths] = nil
-	end
-	return paths, code
+	return paths, order, code
 end
 
 local function is_yazip_path(path)
@@ -289,14 +289,21 @@ local function extract_all()
 	local yazip_path = get_tmp_path(archive_path)
 	extract:entry(archive_path, yazip_path, {})
 
+	local paths, order = table.unpack(get_extracted_files(archive_path))
+	for _, metadata in pairs(paths) do
+		metadata.extracted = true
+	end
+	set_extracted_files(archive_path, paths, order)
+
 	notify("Finished extracting all archive files")
 end
 
 local function extract_hovered_selected()
 	local st = current_state()
 	local archive_path = get_opened_archive(st.active_tab)
-	local yazip_path = get_tmp_path(archive_path)
+	local tmp_path = get_tmp_path(archive_path)
 	local selected_relative = {}
+	local listed_paths, order = table.unpack(get_extracted_files(archive_path))
 
 	local warning = false
 
@@ -308,11 +315,15 @@ local function extract_hovered_selected()
 	end
 
 	for _, path in ipairs(paths) do
+		local relative_path = tostring(Url(path):strip_prefix(tmp_path))
 		if not is_yazip_path(path) then
 			warning = true
 			goto continue
 		end
-		selected_relative[#selected_relative + 1] = path:sub(#yazip_path + 2, #path)
+		-- selected_relative[#selected_relative + 1] = path:sub(#tmp_path + 2, #path)
+		selected_relative[#selected_relative + 1] = relative_path
+		local metadata = listed_paths[relative_path]
+		metadata.extracted = true
 
 		::continue::
 	end
@@ -321,8 +332,9 @@ local function extract_hovered_selected()
 		notify("Non-yazip files in the selection are ignored", "warn")
 	end
 
-	extract:entry(archive_path, yazip_path, selected_relative)
+	extract:entry(archive_path, tmp_path, selected_relative)
 
+	set_extracted_files(archive_path, listed_paths, order)
 	notify(finish_msg)
 end
 
@@ -362,29 +374,33 @@ function M:entry(job)
 	if is_supported(st.mime) then
 		ya.dbg("Opening archive")
 		local pwd = ""
-		local paths
-		while true do
-			local code
-			paths, code = list_paths({ "-p"..pwd, st.hovered_path })
-			if code == 0 then
-				break
-			end
+		local paths, order = table.unpack(get_extracted_files(st.hovered_path))
 
-			if code == 2 then
-				local value, event = ya.input{
-					title = string.format('Password for "%s":', Url(st.hovered_path).name),
-					position = { "center", w = 50 },
-					obscure = true,
-				}
-
-				if event == 1 then
-					pwd = value
-				else
-					return
+		if not paths then
+			while true do
+				local code
+				paths, order, code = list_paths({ "-p"..pwd, st.hovered_path })
+				if code == 0 then
+					break
 				end
-			else
-				notify("Failed to start both `7zz` and `7z`. Do you have 7-zip installed?", "error")
+
+				if code == 2 then
+					local value, event = ya.input{
+						title = string.format('Password for "%s":', Url(st.hovered_path).name),
+						position = { "center", w = 50 },
+						obscure = true,
+					}
+
+					if event == 1 then
+						pwd = value
+					else
+						return
+					end
+				else
+					notify("Failed to start both `7zz` and `7z`. Do you have 7-zip installed?", "error")
+				end
 			end
+			set_extracted_files(st.hovered_path, paths, order)
 		end
 
 		local yazip_path = get_tmp_path(st.hovered_path)
@@ -402,17 +418,25 @@ function M:entry(job)
 			return string.find(path.attr, "D")
 		end
 
-		for _, path in ipairs(paths) do
-			if is_dir(path) then
+		for _, path in ipairs(order) do
+			local metadata = paths[path]
+
+			if metadata.listed then
+				goto continue
+			end
+
+			metadata.listed = true
+
+			if is_dir(metadata) then
 				-- create dir
-				ok, err = fs.create("dir_all", tmp_url:join(path.path))
+				ok, err = fs.create("dir_all", tmp_url:join(path))
 				if not ok then
 					ya.err("Unable to create directory" .. tostring(tmp_url), err)
 					return
 				end
 			else
 				-- create empty file
-				local file_path = tmp_url:join(path.path)
+				local file_path = tmp_url:join(path)
 				local file, err = io.open(tostring(file_path), "w")
 
 				if file then
@@ -422,13 +446,18 @@ function M:entry(job)
 					return
 				end
 			end
+
+			::continue::
 		end
+
+		set_extracted_files(st.hovered_path, paths, order)
 
 		ya.emit("cd", { tmp_url, raw = true })
 	else
 		-- use default behavior when not hovering over a supported archive file
 		ya.emit("enter", {})
 	end
+    ::continue::
 end
 
 function M:setup()
@@ -509,15 +538,27 @@ function M:seek(job) end
 
 function M:fetch(job)
 	local updates, unknown, st = {}, {}, {}
+	local paths
 	for i, file in ipairs(job.files) do
 		if file.cha.is_dummy then
 			st[i] = false
 			goto continue
 		end
 
-		-- TODO: file.cha.len == 0 includes empty files 
-		-- maybe keep track of files that have been extracted
 		if file.cha.len == 0 and is_yazip_path(tostring(file.url)) then
+			local current_st = current_state()
+			local archive_path = get_opened_archive(current_st.active_tab)
+
+			if paths == nil then
+				paths, _ = table.unpack(get_extracted_files(archive_path))
+			end
+
+			local tmp_path = get_tmp_path(archive_path)
+			local temp = tostring(file.url:strip_prefix(tmp_path))
+			local metadata = paths[temp]
+			if metadata ~= nil and metadata.extracted then
+				unknown[#unknown + 1] = file
+			end
 			updates[tostring(file.url)], st[i] = "yazip/file", true
 		else
 			unknown[#unknown + 1] = file
