@@ -1,4 +1,5 @@
-local supported_format = { -- only supports * from regex
+local supported_format = { 
+	-- only supports * which matches any character zero or more times
 	-- copied and expanded from archive.lua
 	"application/zip",
 	"application/rar",
@@ -18,9 +19,6 @@ local supported_format = { -- only supports * from regex
 }
 
 -- UTILS --
-
-local function fail(s, ...) error(string.format(s, ...)) end
-
 local function get_tmp_dir()
 	return os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
 end
@@ -254,15 +252,8 @@ function extract:entry(from, to, args)
 end
 
 function extract:try_with(from, pwd, to, args)
-	if not to then
-		fail("Invalid URL '%s'", from)
-	end
-
 	local archive = require("archive")
 	local child, err = archive.spawn_7z { "x", "-aoa", "-sccUTF-8", "-p" .. pwd, "-o" .. tostring(to), tostring(from), table.unpack(args) }
-	if not child then
-		fail("Failed to start either `7zz` or `7z`, error: " .. err)
-	end
 
 	local output, err = child:wait_with_output()
 	if output and output.status.code == 2 and archive.is_encrypted(output.stderr) then
@@ -270,9 +261,9 @@ function extract:try_with(from, pwd, to, args)
 	end
 
 	if not output then
-		fail("7zip failed to output when extracting '%s', error: %s", from, err)
+		ya.err("7zip failed to output when extracting '%s', error: %s", from, err)
 	elseif output.status.code ~= 0 then
-		fail("7zip exited when extracting '%s', error code %s", from, output.status.code)
+		ya.err("7zip exited when extracting '%s', error code %s", from, output.status.code)
 	end
 end
 
@@ -320,12 +311,24 @@ local function extract_hovered_selected()
 	notify(finish_msg)
 end
 
-local function handle_commands(args)
-	if args[1] == "extract" then
+local function handle_commands(args, st)
+	if args[1] == "extract" and is_yazip_path(st.hovered_path) and get_opened_archive(st.active_tab) ~= nil then
 		if args.all then
 			extract_all()
 		elseif args.hovered_selected then
 			extract_hovered_selected()
+		end
+	elseif args[1] == "quit" then
+		local archive_path = get_cache(st.active_tab)
+		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
+			local archive_cwd = Url(archive_path).name
+			ya.emit("cd", { archive_cwd })
+		end
+
+		if args.no_cwd_file then
+			ya.emit("quit", { "--no-cwd-file" })
+		else
+			ya.emit("quit", {})
 		end
 	end
 end
@@ -336,8 +339,8 @@ local M = {}
 function M:entry(job)
 	local st = state()
 
-	if next(job.args) ~= nil and is_yazip_path(st.hovered_path) and get_opened_archive(st.active_tab) ~= nil then
-		handle_commands(job.args)
+	if next(job.args) ~= nil then
+		handle_commands(job.args, st)
 		return
 	end
 
@@ -348,21 +351,16 @@ function M:entry(job)
 		while true do
 			local code
 			paths, code = list_paths({ "-p"..pwd, st.hovered_path })
-			ya.dbg("fucking paths", paths)
 			if code == 0 then
 				break
 			end
 
 			if code == 2 then
-				notify("File list in this archive is encrypted")
-
 				local value, event = ya.input{
 					title = string.format('Password for "%s":', Url(st.hovered_path).name),
 					position = { "center", w = 50 },
-					obscure = false,
+					obscure = true,
 				}
-
-				ya.dbg("fucking event", event)
 
 				if event == 1 then
 					pwd = value
