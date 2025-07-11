@@ -171,57 +171,6 @@ local is_supported = function(mime)
 	return false
 end
 
----List files in an archive
----@param args table
----@return table files
----@return integer code
----  0: success
----  1: failed to spawn
----  2: wrong password
----  3: partial success
-local function list_paths(args)
-	local archive = require("archive")
-	local child = archive.spawn_7z({ "l", "-ba", "-slt", "-sccUTF-8", table.unpack(args) })
-	if not child then
-		return {}, 0
-	end
-
-	local current_path, paths, order, code = nil, {}, {}, 0
-	local key, value = "", ""
-	while true do
-		local next, event = child:read_line()
-		if event == 1 and archive.is_encrypted(next) then
-			code = 2
-			break
-		elseif event == 1 then
-			code = 3
-			goto continue
-		elseif event ~= 0 or next == nil then
-			break
-		end
-
-		if next == "\n" or next == "\r\n" then
-			goto continue
-		end
-
-		key, value = next:match("^(%u%l+) = (.-)[\r\n]+")
-		if key == "Path" then
-			current_path = value
-			paths[current_path] = { size = 0, attr = "", extracted = false, listed = false }
-			order[#order + 1] = current_path
-		elseif key == "Size" then
-			paths[current_path].size = tonumber(value) or 0
-		elseif key == "Attributes" then
-			paths[current_path].attr = value
-		end
-
-		::continue::
-	end
-	child:start_kill()
-
-	return paths, order, code
-end
-
 local function is_yazip_path(path)
 	local yazip_path = get_yazip_dir()
 	return path:sub(1, #yazip_path) == yazip_path
@@ -244,42 +193,113 @@ local function notify(msg, level)
 	}
 end
 
-local extract = {}
+local SevenZip = {}
 
-function extract:entry(from, to, args)
+function SevenZip:is_encrypted(s) return s:find(" Wrong password", 1, true) end
+
+function SevenZip:spawn(args)
+	local last_err = nil
+	local try = function(name)
+		local stdout = args[2] == "l" and Command.PIPED or Command.NULL
+		local child, err = Command(name):arg(args):stdout(stdout):stderr(Command.PIPED):spawn()
+		if not child then
+			last_err = err
+		end
+		return child
+	end
+
+	local child = try("7zz") or try("7z")
+	if not child then
+		return ya.err("Failed to start either `7zz` or `7z`, error: " .. last_err)
+	end
+	return child, last_err
+end
+
+function SevenZip:get_password(archive_path)
+	local value, event = ya.input {
+		position = { "center", w = 50 },
+		title = string.format('Password for "%s":', Url(archive_path).name),
+		obscure = true,
+	}
+	if event == 1 then
+		return value
+	end
+end
+
+
+function SevenZip:execute(archive_path, command)
 	local pwd = ""
 	while true do
-		if not extract:try_with(Url(from), pwd, Url(to), args) then
-			break
+		local retry, output = self:try_execute(command, pwd)
+		if not retry then
+			return output
 		end
 
-		local value, event = ya.input {
-			position = { "center", w = 50 },
-			title = string.format('Password for "%s":', Url(from).name),
-			obscure = true,
-		}
-		if event == 1 then
-			pwd = value
-		else
-			break
+		pwd = self:get_password(archive_path)
+		if pwd == nil then
+			return
 		end
 	end
 end
 
-function extract:try_with(from, pwd, to, args)
-	local archive = require("archive")
-	local child, err = archive.spawn_7z { "x", "-aoa", "-sccUTF-8", "-p" .. pwd, "-o" .. tostring(to), tostring(from), table.unpack(args) }
+function SevenZip:try_execute(command, pwd)
+	ya.dbg("fucking trying to execute", command)
+	local child, err = self:spawn{ "-p" .. pwd, table.unpack(command) }
 
-	local output, err = child:wait_with_output()
-	if output and output.status.code == 2 and archive.is_encrypted(output.stderr) then
-		return true -- Need to retry
+	local output
+	output, err = child:wait_with_output()
+	if output and output.status.code == 2 and self:is_encrypted(output.stderr) then
+		if pwd ~= "" then
+			notify("Incorrect password")
+		end
+		return true, nil -- Need to retry
 	end
 
+	return false, output
+
+	-- if not output then
+	-- 	ya.err("7zip failed to output when extracting '%s', error: %s", from, err)
+	-- elseif output.status.code ~= 0 then
+	-- 	ya.err("7zip exited when extracting '%s', error code %s", from, output.status.code)
+	-- end
+end
+
+function SevenZip:extract(archive_path, destination, inner_paths)
+	local command = { "x", "-aoa", "-sccUTF-8", "-o" .. destination, archive_path, table.unpack(inner_paths) }
+	return self:execute(archive_path, command)
+end
+
+function SevenZip:list_paths(archive_path)
+	local output = self:execute(archive_path, { "l", "-ba", "-slt", "-sccUTF-8", archive_path })
 	if not output then
-		ya.err("7zip failed to output when extracting '%s', error: %s", from, err)
-	elseif output.status.code ~= 0 then
-		ya.err("7zip exited when extracting '%s', error code %s", from, output.status.code)
+		return
 	end
+
+	local current_path, paths, order = nil, {}, {}
+	local key, value = "", ""
+	for line in output.stdout:gmatch("[^\r\n]+") do
+		key, value = line:match("([^=]+) = (.+)")
+		if key == "Path" then
+			current_path = value
+			paths[current_path] = { size = 0, attr = "", extracted = false, listed = false }
+			order[#order + 1] = current_path
+		elseif key == "Size" then
+			paths[current_path].size = tonumber(value) or 0
+		elseif key == "Attributes" then
+			paths[current_path].attr = value
+		end
+	end
+
+	return paths, order
+end
+
+function SevenZip:rename(archive_path, rename_pairs)
+	for from, to in pairs(rename_pairs) do
+		print("adsf")
+	end
+end
+
+function SevenZip:update(archive_path, to, with)
 end
 
 -- commands --
@@ -287,7 +307,11 @@ local function extract_all()
 	local st = current_state()
 	local archive_path = get_opened_archive(st.active_tab)
 	local yazip_path = get_tmp_path(archive_path)
-	extract:entry(archive_path, yazip_path, {})
+	local output = SevenZip:extract(archive_path, yazip_path, {})
+
+	if not output then
+		return -- user didn't enter password
+	end
 
 	local paths, order = table.unpack(get_extracted_files(archive_path))
 	for _, metadata in pairs(paths) do
@@ -332,7 +356,10 @@ local function extract_hovered_selected()
 		notify("Non-yazip files in the selection are ignored", "warn")
 	end
 
-	extract:entry(archive_path, tmp_path, selected_relative)
+	local output = SevenZip:extract(archive_path, tmp_path, selected_relative)
+	if not output then
+		return -- user didn't enter password
+	end
 
 	set_extracted_files(archive_path, listed_paths, order)
 	notify(finish_msg)
@@ -353,7 +380,7 @@ local function handle_commands(args, st)
 		end
 
 		if args.no_cwd_file then
-			ya.emit("quit", { "--no-cwd-file" })
+			ya.emit("quit", { no_cwd_file = true })
 		else
 			ya.emit("quit", {})
 		end
@@ -373,32 +400,12 @@ function M:entry(job)
 
 	if is_supported(st.mime) then
 		ya.dbg("Opening archive")
-		local pwd = ""
 		local paths, order = table.unpack(get_extracted_files(st.hovered_path))
 
 		if not paths then
-			while true do
-				local code
-				paths, order, code = list_paths({ "-p"..pwd, st.hovered_path })
-				if code == 0 then
-					break
-				end
-
-				if code == 2 then
-					local value, event = ya.input{
-						title = string.format('Password for "%s":', Url(st.hovered_path).name),
-						position = { "center", w = 50 },
-						obscure = true,
-					}
-
-					if event == 1 then
-						pwd = value
-					else
-						return
-					end
-				else
-					notify("Failed to start both `7zz` and `7z`. Do you have 7-zip installed?", "error")
-				end
+			paths, order = SevenZip:list_paths(st.hovered_path)
+			if paths == nil then
+				return
 			end
 			set_extracted_files(st.hovered_path, paths, order)
 		end
@@ -522,6 +529,25 @@ function M:setup()
 			if archive_path ~= nil then
 				ya.emit("cd", { archive_path.parent })
 			end
+		end
+	end)
+
+	ps.sub("@yank", function(job)
+		ya.dbg("@yank job", job)
+	end)
+
+	ps.sub("move", function(job)
+		ya.dbg("move job", job)
+	end)
+
+	ps.sub("rename", function(job)
+		ya.dbg("rename job", job)
+	end)
+
+	ps.sub("bulk", function(bulk_iter)
+		for from, to in pairs(bulk_iter) do
+			ya.dbg("bulk job", from, to)
+			rename(from, to)
 		end
 	end)
 end
