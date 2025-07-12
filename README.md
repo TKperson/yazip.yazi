@@ -38,3 +38,7 @@ prepend_keymap = [
   { on = ["E"], run = 'plugin yazip -- extract --all',              desc = "Extract everything inside of Yazip" },
 ]
 ```
+
+## Known issues
+* Swapping tabs that have archived opened will break the plugin
+  * I'm unable to find a solution for this because `ps.sub` does not give any information about tabs getting swapped

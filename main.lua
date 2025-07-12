@@ -23,10 +23,6 @@ local function get_tmp_dir()
 	return os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
 end
 
-local function get_yazip_dir()
-	return get_tmp_dir() .. "/yazip"
-end
-
 local charset = {}
 do -- [0-9a-zA-Z]
 	for c = 48, 57 do
@@ -51,7 +47,7 @@ end
 
 -- ya.sync --
 
-local current_state = ya.sync(function(st)
+local current_state = ya.sync(function()
 	local h = cx.active.current.hovered
 	local selected = {}
 	for i, url in pairs(cx.active.selected) do
@@ -65,67 +61,64 @@ local current_state = ya.sync(function(st)
 	return {
 		mime = h:mime(),
 		hovered_path = tostring(h.url),
-		cwd_path = tostring(cx.active.current.cwd),
 		active_tab = cx.tabs.idx,
 		selected = selected,
 	}
 end)
 
-local set_tmp_path = ya.sync(function(st, archive_path, tmp_path)
-	if st.tmp_paths == nil then
-		st.tmp_paths = {}
-	end
+local get_session_id = ya.sync(function(st)
+	return st.session_id
+end)
 
+local get_cwd = ya.sync(function()
+	return tostring(cx.active.current.cwd)
+end)
+
+local set_tmp_path = ya.sync(function(st, archive_path, tmp_path)
 	st.tmp_paths[archive_path] = tmp_path
 end)
 
 local get_tmp_path = ya.sync(function(st, archive_path)
-	if st.tmp_paths == nil then
-		st.tmp_paths = {}
-		return nil
-	end
-
 	return st.tmp_paths[archive_path]
 end)
 
 local set_opened_archive = ya.sync(function(st, archive_path, tab)
-	if st.opened_archive == nil then
-		st.opened_archive = {}
-	end
-
 	st.opened_archive[tab] = archive_path
 end)
 
 local get_opened_archive = ya.sync(function(st, tab)
-	if st.opened_archive == nil then
-		return nil
-	end
-
 	return st.opened_archive[tab]
 end)
 
-local set_extracted_files = ya.sync(function(st, archive_path, extracted_files, order)
-	if st.extracted_files == nil then
-		st.extracted_files = {}
-	end
-
-	if st.extracted_files_order == nil then
-		st.extracted_files_order = {}
-	end
-
-	st.extracted_files[archive_path] = extracted_files
-	st.extracted_files_order[archive_path] = order
+local set_archive_files = ya.sync(function(st, archive_path, archive_files, order)
+	st.archive_files[archive_path] = archive_files
+	st.archive_files_order[archive_path] = order
 end)
 
-local get_extracted_files = ya.sync(function(st, archive_path)
-	if st.extracted_files == nil then
-		return {}
-	end
+local get_archive_files = ya.sync(function(st, archive_path)
+	return { st.archive_files[archive_path], st.archive_files_order[archive_path] }
+end)
 
-	return { st.extracted_files[archive_path], st.extracted_files_order[archive_path] }
+local save_archive_password = ya.sync(function(st, archive_path, password)
+	st.saved_passwords[archive_path] = password
+end)
+
+local get_archive_password = ya.sync(function(st, archive_path)
+	return st.saved_passwords[archive_path]
+end)
+
+local add_changes = ya.sync(function(st, archive, new_changes)
+	if st.archive_changes[archive] == nil then
+		st.archive_changes[archive] = {}
+	end
+	st.archive_changes[archive][#st.changes + 1] = new_changes
 end)
 
 -- helper functions --
+
+local function get_yazip_dir()
+	return get_tmp_dir() .. "/yazip." .. get_session_id()
+end
 
 local function two_deep(archive_path, cwd)
 	local tmp_path = get_tmp_path(archive_path)
@@ -182,14 +175,14 @@ local function notify(msg, level)
 	end
 
 	ya.notify {
-	  -- Title.
-	  title = "Yazip",
-	  -- Content.
-	  content = msg,
-	  -- Timeout.
-	  timeout = 6.5,
-	  -- Level, available values: "info", "warn", and "error", default is "info".
-	  level = level,
+		-- Title.
+		title = "Yazip",
+		-- Content.
+		content = msg,
+		-- Timeout.
+		timeout = 6.5,
+		-- Level, available values: "info", "warn", and "error", default is "info".
+		level = level,
 	}
 end
 
@@ -228,10 +221,11 @@ end
 
 
 function SevenZip:execute(archive_path, command)
-	local pwd = ""
+	local pwd = get_archive_password(archive_path) or ""
 	while true do
 		local retry, output = self:try_execute(command, pwd)
 		if not retry then
+			save_archive_password(archive_path, pwd)
 			return output
 		end
 
@@ -243,7 +237,7 @@ function SevenZip:execute(archive_path, command)
 end
 
 function SevenZip:try_execute(command, pwd)
-	ya.dbg("fucking trying to execute", command)
+	ya.dbg("trying to execute (no password included)", command)
 	local child, err = self:spawn{ "-p" .. pwd, table.unpack(command) }
 
 	local output
@@ -255,13 +249,14 @@ function SevenZip:try_execute(command, pwd)
 		return true, nil -- Need to retry
 	end
 
-	return false, output
-
 	-- if not output then
 	-- 	ya.err("7zip failed to output when extracting '%s', error: %s", from, err)
 	-- elseif output.status.code ~= 0 then
-	-- 	ya.err("7zip exited when extracting '%s', error code %s", from, output.status.code)
+	-- 	ya.err("7zip exited when while executing '%s', error code %s", tostring(table), output.status.code)
 	-- end
+
+	return false, output
+
 end
 
 function SevenZip:extract(archive_path, destination, inner_paths)
@@ -294,12 +289,25 @@ function SevenZip:list_paths(archive_path)
 end
 
 function SevenZip:rename(archive_path, rename_pairs)
-	for from, to in pairs(rename_pairs) do
-		print("adsf")
+	local output = self:execute(archive_path, { "l", "-ba", "-slt", "-sccUTF-8", archive_path, table.unpack(rename_pairs) })
+
+	if not output then
+		return
 	end
+
+	notify("Finished renaming file(s)")
 end
 
 function SevenZip:update(archive_path, to, with)
+end
+
+function SevenZip:apply_changes(archive_path, changes)
+	for _, change in ipairs(changes) do
+		local change_type = change[1]
+		if change_type == "rename" then
+			self:rename(archive_path)
+		end
+	end
 end
 
 -- commands --
@@ -313,11 +321,11 @@ local function extract_all()
 		return -- user didn't enter password
 	end
 
-	local paths, order = table.unpack(get_extracted_files(archive_path))
+	local paths, order = table.unpack(get_archive_files(archive_path))
 	for _, metadata in pairs(paths) do
 		metadata.extracted = true
 	end
-	set_extracted_files(archive_path, paths, order)
+	set_archive_files(archive_path, paths, order)
 
 	notify("Finished extracting all archive files")
 end
@@ -327,7 +335,7 @@ local function extract_hovered_selected()
 	local archive_path = get_opened_archive(st.active_tab)
 	local tmp_path = get_tmp_path(archive_path)
 	local selected_relative = {}
-	local listed_paths, order = table.unpack(get_extracted_files(archive_path))
+	local listed_paths, order = table.unpack(get_archive_files(archive_path))
 
 	local warning = false
 
@@ -361,7 +369,7 @@ local function extract_hovered_selected()
 		return -- user didn't enter password
 	end
 
-	set_extracted_files(archive_path, listed_paths, order)
+	set_archive_files(archive_path, listed_paths, order)
 	notify(finish_msg)
 end
 
@@ -400,18 +408,19 @@ function M:entry(job)
 
 	if is_supported(st.mime) then
 		ya.dbg("Opening archive")
-		local paths, order = table.unpack(get_extracted_files(st.hovered_path))
+		local paths, order = table.unpack(get_archive_files(st.hovered_path))
 
 		if not paths then
 			paths, order = SevenZip:list_paths(st.hovered_path)
 			if paths == nil then
 				return
 			end
-			set_extracted_files(st.hovered_path, paths, order)
+			set_archive_files(st.hovered_path, paths, order)
 		end
 
+		local archive_name = Url(st.hovered_path).name
 		local yazip_path = get_tmp_path(st.hovered_path)
-		local tmp_url = (yazip_path and Url(yazip_path)) or Url(get_yazip_dir()):join(random_string(8))
+		local tmp_url = (yazip_path and Url(yazip_path)) or fs.unique_name(Url(get_yazip_dir()):join(archive_name))
 		set_tmp_path(st.hovered_path, tostring(tmp_url))
 		set_opened_archive(st.hovered_path, st.active_tab)
 
@@ -457,17 +466,33 @@ function M:entry(job)
 			::continue::
 		end
 
-		set_extracted_files(st.hovered_path, paths, order)
+		set_archive_files(st.hovered_path, paths, order)
 
 		ya.emit("cd", { tmp_url, raw = true })
 	else
 		-- use default behavior when not hovering over a supported archive file
 		ya.emit("enter", {})
 	end
-    ::continue::
 end
 
 function M:setup()
+	local st = self
+	st.session_id = random_string(5)
+	st.tmp_paths = {}
+	st.opened_archive = {}
+	st.archive_changes = {}
+	st.archive_files = {}
+	st.archive_files_order = {}
+	st.saved_passwords = {}
+
+
+	for i = 1, 8 do
+		st.opened_archive[i] = nil
+	end
+
+	local previous_tab_length = 1
+	local last_tab_idx = 1
+
 	Header.cwd = function(self)
 		local max = self._area.w - self._right_width
 		if max <= 0 then
@@ -521,15 +546,62 @@ function M:setup()
 	end
 
 	ps.sub("cd", function(job)
-		local st = current_state()
+		local cwd_path = get_cwd()
 
 		-- exit
-		if st.cwd_path == get_yazip_dir() then
-			local archive_path = Url(get_opened_archive(job.tab))
+		if cwd_path == get_yazip_dir() then
+			local archive_path = get_opened_archive(job.tab)
 			if archive_path ~= nil then
-				ya.emit("cd", { archive_path.parent })
+				ya.emit("cd", { Url(archive_path).parent })
+			else
+				ya.err("The archive path is nil when exiting on tab #" .. tostring(job.tab))
 			end
 		end
+	end)
+
+	local function insert(t, pos, value)
+		if pos > #t then
+			t[pos] = value
+			return
+		end
+
+		for i = #t, pos, -1 do
+			t[i+1] = t[i]
+		end
+
+		t[pos] = value
+	end
+
+	local function remove(t, pos)
+		if pos > #t then
+			return
+		end
+
+		for i = pos, #t - 1 do
+			t[i] = t[i + 1]
+		end
+
+		t[#t] = nil
+	end
+
+	-- FIXME: handle opening and closing tabs
+	ps.sub("tab", function(job)
+		ya.dbg("fucking tab lmao job", #cx.tabs)
+		ya.dbg("fucking previous tab lenght", previous_tab_length)
+		ya.dbg("fucking opened arhcive", st.opened_archive)
+		ya.dbg("fucking cwd", tostring(cx.active.current.cwd))
+		ya.dbg("fucking yazip path", is_yazip_path(tostring(cx.active.current.cwd)))
+		if previous_tab_length ~= #cx.tabs and is_yazip_path(tostring(cx.active.current.cwd)) then
+			if previous_tab_length < #cx.tabs then
+				insert(st.opened_archive, job.idx, st.opened_archive[job.idx - 1])
+			elseif previous_tab_length > #cx.tabs then
+				remove(st.opened_archive, last_tab_idx)
+				st.opened_archive[#st.opened_archive+1] = nil
+			end
+			ya.dbg("fucking opened_archive", st.opened_archive)
+		end
+		last_tab_idx = job.idx
+		previous_tab_length = #cx.tabs
 	end)
 
 	ps.sub("@yank", function(job)
@@ -541,13 +613,37 @@ function M:setup()
 	end)
 
 	ps.sub("rename", function(job)
-		ya.dbg("rename job", job)
+		local archive_path = get_opened_archive(job.tab)
+		local tmp_path = get_tmp_path(archive_path)
+
+		if tmp_path ~= nil and is_yazip_path(tostring(job.to)) then
+			local rename_pairs = {
+				tostring(job.from:strip_prefix(tmp_path)),
+				tostring(job.to:strip_prefix(tmp_path))
+			}
+
+			local change = {"rename", archive_path, rename_pairs}
+			self.archive_changes[#self.archive_changes+1] = change
+		end
 	end)
 
 	ps.sub("bulk", function(bulk_iter)
-		for from, to in pairs(bulk_iter) do
-			ya.dbg("bulk job", from, to)
-			rename(from, to)
+		local rename_pairs = {}
+		local archive_path = get_opened_archive(cx.tabs.idx)
+		local tmp_path = get_tmp_path(archive_path)
+
+		if tmp_path ~= nil then
+			for from, to in pairs(bulk_iter) do
+				if is_yazip_path(tostring(to)) then
+					table.insert(rename_pairs, tostring(from:strip_prefix(tmp_path)))
+					table.insert(rename_pairs, tostring(to:strip_prefix(tmp_path)))
+				end
+			end
+
+			if #rename_pairs ~= 0 then
+				local change = {"rename", archive_path, rename_pairs}
+				self.archive_changes[#self.archive_changes+1] = change
+			end
 		end
 	end)
 end
@@ -572,11 +668,12 @@ function M:fetch(job)
 		end
 
 		if file.cha.len == 0 and is_yazip_path(tostring(file.url)) then
+			-- handle empty file vs unextracted file
 			local current_st = current_state()
 			local archive_path = get_opened_archive(current_st.active_tab)
 
 			if paths == nil then
-				paths, _ = table.unpack(get_extracted_files(archive_path))
+				paths, _ = table.unpack(get_archive_files(archive_path))
 			end
 
 			local tmp_path = get_tmp_path(archive_path)
@@ -585,6 +682,8 @@ function M:fetch(job)
 			if metadata ~= nil and metadata.extracted then
 				unknown[#unknown + 1] = file
 			end
+			--
+
 			updates[tostring(file.url)], st[i] = "yazip/file", true
 		else
 			unknown[#unknown + 1] = file
