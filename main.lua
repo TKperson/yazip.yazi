@@ -107,11 +107,8 @@ local get_archive_password = ya.sync(function(st, archive_path)
 	return st.saved_passwords[archive_path]
 end)
 
-local add_changes = ya.sync(function(st, archive, new_changes)
-	if st.archive_changes[archive] == nil then
-		st.archive_changes[archive] = {}
-	end
-	st.archive_changes[archive][#st.changes + 1] = new_changes
+local get_archive_tasks = ya.sync(function(st)
+	return st.archive_tasks
 end)
 
 -- helper functions --
@@ -188,12 +185,13 @@ end
 
 local SevenZip = {}
 
-function SevenZip:is_encrypted(s) return s:find(" Wrong password", 1, true) end
+function SevenZip:is_encrypted(s) return s:find(" Wrong password", 1, true) or s:find("Break signaled", 1, true) end
 
 function SevenZip:spawn(args)
 	local last_err = nil
 	local try = function(name)
-		local stdout = args[2] == "l" and Command.PIPED or Command.NULL
+		-- local stdout = args[2] == "l" and Command.PIPED or Command.NULL
+		local stdout = Command.PIPED
 		local child, err = Command(name):arg(args):stdout(stdout):stderr(Command.PIPED):spawn()
 		if not child then
 			last_err = err
@@ -238,29 +236,40 @@ end
 
 function SevenZip:try_execute(command, pwd)
 	ya.dbg("trying to execute (no password included)", command)
-	local child, err = self:spawn{ "-p" .. pwd, table.unpack(command) }
+	local child, err
+	if pwd == "" then
+		child, err = self:spawn{ table.unpack(command) }
+	else
+		child, err = self:spawn{ "-p" .. pwd, table.unpack(command) }
+	end
 
 	local output
 	output, err = child:wait_with_output()
-	if output and output.status.code == 2 and self:is_encrypted(output.stderr) then
+	-- status code = 255 means "Break signaled" this happens when it asks for password and stdin got cancelled
+	if output and (output.status.code == 2 or output.status.code == 255) and self:is_encrypted(output.stderr) then
 		if pwd ~= "" then
 			notify("Incorrect password")
 		end
 		return true, nil -- Need to retry
 	end
 
-	-- if not output then
-	-- 	ya.err("7zip failed to output when extracting '%s', error: %s", from, err)
-	-- elseif output.status.code ~= 0 then
-	-- 	ya.err("7zip exited when while executing '%s', error code %s", tostring(table), output.status.code)
-	-- end
+	if not output then
+		ya.err("7zip failed to output when executing", command, tostring(err))
+	elseif output.status.code ~= 0 then
+		ya.err("7zip exited when while executing", command, output.status.code, output.stderr, output.stdout)
+	end
 
 	return false, output
 
 end
 
 function SevenZip:extract(archive_path, destination, inner_paths)
-	local command = { "x", "-aoa", "-sccUTF-8", "-o" .. destination, archive_path, table.unpack(inner_paths) }
+	local command = { "x", "-aoa", "-o" .. destination, archive_path, table.unpack(inner_paths) }
+	return self:execute(archive_path, command)
+end
+
+function SevenZip:extract_only(archive_path, destination, inner_paths)
+	local command = { "e", "-aoa",  "-o" .. destination, archive_path, table.unpack(inner_paths) }
 	return self:execute(archive_path, command)
 end
 
@@ -289,24 +298,38 @@ function SevenZip:list_paths(archive_path)
 end
 
 function SevenZip:rename(archive_path, rename_pairs)
-	local output = self:execute(archive_path, { "l", "-ba", "-slt", "-sccUTF-8", archive_path, table.unpack(rename_pairs) })
+	return self:execute(archive_path, { "rn", archive_path, table.unpack(rename_pairs) })
+end
 
-	if not output then
+function SevenZip:update(archive_path, update_path)
+	-- the /./ at the end is used to set relative path to start inside of the archive path
+	return self:execute(archive_path, { "u", archive_path, update_path.."/./" })
+end
+
+function SevenZip:delete(archive_path, inner_paths)
+	return self:execute(archive_path, { "d", archive_path, table.unpack(inner_paths) })
+end
+
+function SevenZip:do_task(task)
+	ya.dbg("doing task", task)
+	local archive_path = task.archive_path
+	-- change must always contains archive_path and type
+	local output
+	if task.type == "rename" then
+		output = self:rename(archive_path, task.inner_pairs)
+	elseif task.type == "extract" then
+		output = self:extract_only(archive_path, task.destination, task.inner_paths)
+	elseif task.type == "update" then
+		output = self:update(archive_path, task.update_path)
+	elseif task.type == "delete" then
+		output = self:delete(archive_path, task.inner_paths)
+	else
+		ya.err("unsupported change type", task.archive_path, task.type)
 		return
 	end
 
-	notify("Finished renaming file(s)")
-end
-
-function SevenZip:update(archive_path, to, with)
-end
-
-function SevenZip:apply_changes(archive_path, changes)
-	for _, change in ipairs(changes) do
-		local change_type = change[1]
-		if change_type == "rename" then
-			self:rename(archive_path)
-		end
+	if output then
+		ya.dbg("output log", output.status.code, output.stdout, output.stderr)
 	end
 end
 
@@ -380,6 +403,11 @@ local function handle_commands(args, st)
 		elseif args.hovered_selected then
 			extract_hovered_selected()
 		end
+	elseif args[1] == "do_tasks" then
+		local tasks = get_archive_tasks()
+		for _, task in ipairs(tasks) do
+			SevenZip:do_task(task)
+		end
 	elseif args[1] == "quit" then
 		local archive_path = get_opened_archive(st.active_tab)
 		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
@@ -392,6 +420,39 @@ local function handle_commands(args, st)
 		else
 			ya.emit("quit", {})
 		end
+	end
+end
+
+local function by_parent_path(a, b)
+	return tostring(Url(a).parent) < tostring(Url(b).parent)
+end
+
+local function fill_directories(paths, order)
+	table.sort(order, by_parent_path)
+
+	local to_be_inserted = {}
+	for i, path in ipairs(order) do
+		local parent = Url(path).parent
+		while true do
+			if parent == nil or tostring(parent) == "" then
+				break
+			end
+
+			local parent_path = tostring(parent)
+			if paths[parent_path] == nil then
+				paths[parent_path] = { size = 0, attr = "D", extracted = false, listed = false }
+				to_be_inserted[#to_be_inserted+1] = {index = i, dir = parent_path}
+			else
+				break
+			end
+
+			parent = parent.parent
+		end
+	end
+
+	for i = #to_be_inserted, 1, -1 do
+		local item = to_be_inserted[i]
+		table.insert(order, item.index, item.dir)
 	end
 end
 
@@ -415,6 +476,7 @@ function M:entry(job)
 			if paths == nil then
 				return
 			end
+			fill_directories(paths, order)
 			set_archive_files(st.hovered_path, paths, order)
 		end
 
@@ -480,84 +542,13 @@ function M:setup()
 	st.session_id = random_string(5)
 	st.tmp_paths = {}
 	st.opened_archive = {}
-	st.archive_changes = {}
 	st.archive_files = {}
 	st.archive_files_order = {}
 	st.saved_passwords = {}
-
-
-	for i = 1, 8 do
-		st.opened_archive[i] = nil
-	end
+	st.archive_tasks = {}
 
 	local previous_tab_length = 1
 	local last_tab_idx = 1
-
-	Header.cwd = function(self)
-		local max = self._area.w - self._right_width
-		if max <= 0 then
-			return ""
-		end
-
-		local cwd = tostring(self._current.cwd)
-		local archive_path = get_opened_archive(cx.tabs.idx)
-		local s
-		if is_yazip_path(cwd) and archive_path ~= nil then
-			s = ya.readable_path(archive_path)
-		else
-			s = ya.readable_path(cwd) .. self:flags()
-		end
-		return ui.Span(ya.truncate(s, { max = max, rtl = true })):style(th.mgr.cwd)
-	end
-
-	Header:children_add(function(self)
-		local cwd = tostring(self._current.cwd)
-		local archive_path = get_opened_archive(cx.tabs.idx)
-		local s = ""
-		if is_yazip_path(cwd) and archive_path ~= nil then
-			if self._current == nil or self._current.hovered == nil then
-				s = "  " .. self:flags()
-			else
-				local h_url = tostring(self._current.hovered.url)
-				local inner_archive_path = h_url:sub(#get_tmp_path(archive_path) + 2, #h_url)
-				s = "  " .. inner_archive_path .. self:flags()
-			end
-		end
-		return ui.Span(s):fg("#ECA517")
-	end, 1100, Header.LEFT)
-
-	local old_new = Parent.new
-	function Parent:new(area, tab)
-		local archive_path = get_opened_archive(cx.tabs.idx)
-		local cwd_path = tostring(cx.active.current.cwd)
-
-		if is_yazip_path(cwd_path) and archive_path ~= nil and not two_deep(archive_path, cwd_path) then
-			local archive_name = Url(archive_path).name
-			local url = Url(archive_path:sub(1, #archive_path - #archive_name))
-			local parent = cx.active:history(url)
-			if parent then
-				tab = { parent = parent }
-			else
-				ya.err("Unable to render the correct parent window")
-			end
-		end
-
-		return old_new(self, area, tab)
-	end
-
-	ps.sub("cd", function(job)
-		local cwd_path = get_cwd()
-
-		-- exit
-		if cwd_path == get_yazip_dir() then
-			local archive_path = get_opened_archive(job.tab)
-			if archive_path ~= nil then
-				ya.emit("cd", { Url(archive_path).parent })
-			else
-				ya.err("The archive path is nil when exiting on tab #" .. tostring(job.tab))
-			end
-		end
-	end)
 
 	local function insert(t, pos, value)
 		if pos > #t then
@@ -584,13 +575,94 @@ function M:setup()
 		t[#t] = nil
 	end
 
-	-- FIXME: handle opening and closing tabs
+	local function url_to_archive(url)
+		for archive_path, tmp_path in pairs(st.tmp_paths) do
+			if url:starts_with(tmp_path) then
+				return archive_path
+			end
+		end
+	end
+
+	local function save_tasks(tasks)
+		if #tasks > 0 then
+			-- extends st.archive_tasks with tasks
+			for i = 1, #tasks do
+			  st.archive_tasks[#st.archive_tasks+1] = tasks[i]
+			end
+			ya.emit("plugin", {self._id , "do_tasks"})
+		end
+	end
+
+	Header.cwd = function(self)
+		local max = self._area.w - self._right_width
+		if max <= 0 then
+			return ""
+		end
+
+		local cwd = tostring(self._current.cwd)
+		local archive_path = get_opened_archive(cx.tabs.idx)
+		local s
+		if is_yazip_path(cwd) and archive_path ~= nil then
+			s = ya.readable_path(archive_path)
+		else
+			s = ya.readable_path(cwd) .. self:flags()
+		end
+		return ui.Span(ya.truncate(s, { max = max, rtl = true })):style(th.mgr.cwd)
+	end
+
+	Header:children_add(function(self)
+		local cwd = self._current.cwd
+		local archive_path = url_to_archive(cwd)
+		local s = ""
+		if archive_path ~= nil then
+			if self._current.hovered == nil then
+				local tmp_path = st.tmp_paths[archive_path]
+				local inner_archive_path = cwd:strip_prefix(tmp_path)
+				s = "  " .. inner_archive_path .. self:flags()
+			else
+				local h_url = tostring(self._current.hovered.url)
+				local inner_archive_path = h_url:sub(#get_tmp_path(archive_path) + 2, #h_url)
+				s = "  " .. inner_archive_path .. self:flags()
+			end
+		end
+		return ui.Span(s):fg("#ECA517")
+	end, 1100, Header.LEFT)
+
+	local old_new = Parent.new
+	function Parent:new(area, tab)
+		local archive_path = get_opened_archive(cx.tabs.idx)
+		local cwd_path = tostring(cx.active.current.cwd)
+
+		if is_yazip_path(cwd_path) and archive_path ~= nil and not two_deep(archive_path, cwd_path) then
+			local url = Url(archive_path).parent
+			local parent = cx.active:history(url)
+			if parent then
+				tab = { parent = parent }
+			else
+				-- FIXME: handle cx.active:history(url) when it returns nil
+				ya.err("Unable to render the correct parent window")
+			end
+		end
+
+		return old_new(self, area, tab)
+	end
+
+	ps.sub("cd", function(job)
+		local cwd_path = get_cwd()
+
+		-- exit
+		if cwd_path == get_yazip_dir() then
+			local archive_path = get_opened_archive(job.tab)
+			if archive_path ~= nil then
+				ya.emit("cd", { Url(archive_path).parent })
+			else
+				ya.err("The archive path is nil when exiting on tab #" .. tostring(job.tab))
+			end
+		end
+	end)
+
+	-- FIXME: handle tab swapping
 	ps.sub("tab", function(job)
-		ya.dbg("fucking tab lmao job", #cx.tabs)
-		ya.dbg("fucking previous tab lenght", previous_tab_length)
-		ya.dbg("fucking opened arhcive", st.opened_archive)
-		ya.dbg("fucking cwd", tostring(cx.active.current.cwd))
-		ya.dbg("fucking yazip path", is_yazip_path(tostring(cx.active.current.cwd)))
 		if previous_tab_length ~= #cx.tabs and is_yazip_path(tostring(cx.active.current.cwd)) then
 			if previous_tab_length < #cx.tabs then
 				insert(st.opened_archive, job.idx, st.opened_archive[job.idx - 1])
@@ -598,53 +670,169 @@ function M:setup()
 				remove(st.opened_archive, last_tab_idx)
 				st.opened_archive[#st.opened_archive+1] = nil
 			end
-			ya.dbg("fucking opened_archive", st.opened_archive)
 		end
 		last_tab_idx = job.idx
 		previous_tab_length = #cx.tabs
 	end)
 
-	ps.sub("@yank", function(job)
-		ya.dbg("@yank job", job)
+	ps.sub("@yank", function()
+		if cx.yanked.is_cut then
+			return -- handled in `ps.sub("move", callback)`
+		end
+
+		local tasks = {}
+
+		for _, url in pairs(cx.yanked) do
+			local archive_path = url_to_archive(url)
+			if archive_path ~= nil then
+				local tmp_path = st.tmp_paths[archive_path]
+				tasks[#tasks+1] = {type = "update", archive_path = archive_path, update_path = tmp_path}
+			end
+		end
+
+		save_tasks(tasks)
 	end)
 
 	ps.sub("move", function(job)
-		ya.dbg("move job", job)
+		local tasks = {}
+		local extract_tasks = {}
+		local update_tasks = {}
+
+		for _, item in ipairs(job.items) do
+			local from = tostring(item.from)
+			local to = tostring(item.to)
+			local from_archive_path = url_to_archive(item.from)
+			local to_archive_path = url_to_archive(item.to)
+			if from_archive_path ~= nil then
+				local archive_path = tostring(from_archive_path)
+				if extract_tasks[archive_path] == nil then
+					extract_tasks[archive_path] = {}
+				end
+				extract_tasks[archive_path][#extract_tasks[archive_path]+1] = {from = from, to = to}
+			end
+
+			if to_archive_path ~= nil then
+				local archive_path = tostring(to_archive_path)
+				update_tasks[archive_path] = st.tmp_paths[archive_path]
+			end
+		end
+
+		-- converting to tasks
+		for archive_path, locations in pairs(extract_tasks) do
+			local destination = locations[1].to
+			local inner_paths = {}
+			local tmp_path = st.tmp_paths[archive_path]
+
+			for _, location in ipairs(locations) do
+				if destination ~= location.to then
+					notify("There should only be one destination", "error")
+					return
+				end
+				inner_paths[#inner_paths+1] = tostring(Url(location.from):strip_prefix(tmp_path))
+			end
+
+			tasks[#tasks+1] = {
+				type = "extract",
+				archive_path = archive_path,
+				destination = tostring(Url(destination).parent),
+				inner_paths = inner_paths,
+			}
+
+			tasks[#tasks+1] = {
+				type = "delete",
+				archive_path = archive_path,
+				inner_paths = inner_paths,
+			}
+		end
+		for archive_path, tmp_path in pairs(update_tasks) do
+			tasks[#tasks+1] = {
+				type = "update",
+				archive_path = archive_path,
+				update_path = tmp_path
+			}
+		end
+		save_tasks(tasks)
 	end)
 
 	ps.sub("rename", function(job)
-		local archive_path = get_opened_archive(job.tab)
-		local tmp_path = get_tmp_path(archive_path)
+		local archive_path = url_to_archive(job.to)
 
-		if tmp_path ~= nil and is_yazip_path(tostring(job.to)) then
-			local rename_pairs = {
-				tostring(job.from:strip_prefix(tmp_path)),
-				tostring(job.to:strip_prefix(tmp_path))
-			}
+		if archive_path ~= nil then
+			local tmp_path = st.tmp_paths[archive_path]
 
-			local change = {"rename", archive_path, rename_pairs}
-			self.archive_changes[#self.archive_changes+1] = change
+			if tmp_path ~= nil then
+				local rename_pairs = {
+					tostring(job.from:strip_prefix(tmp_path)),
+					tostring(job.to:strip_prefix(tmp_path))
+				}
+				local task = {type = "rename", archive_path = archive_path, inner_pairs = rename_pairs}
+				save_tasks({ task })
+			end
+
 		end
 	end)
 
 	ps.sub("bulk", function(bulk_iter)
 		local rename_pairs = {}
-		local archive_path = get_opened_archive(cx.tabs.idx)
-		local tmp_path = get_tmp_path(archive_path)
 
-		if tmp_path ~= nil then
-			for from, to in pairs(bulk_iter) do
-				if is_yazip_path(tostring(to)) then
-					table.insert(rename_pairs, tostring(from:strip_prefix(tmp_path)))
-					table.insert(rename_pairs, tostring(to:strip_prefix(tmp_path)))
+		for from, to in pairs(bulk_iter) do
+			local archive_path = url_to_archive(from)
+
+			if archive_path ~= nil then
+				local tmp_path = st.tmp_paths[archive_path]
+
+				if rename_pairs[archive_path] == nil then
+					rename_pairs[archive_path] = {
+						type = "rename",
+						archive_path = archive_path,
+						inner_pairs = {}
+					}
 				end
-			end
 
-			if #rename_pairs ~= 0 then
-				local change = {"rename", archive_path, rename_pairs}
-				self.archive_changes[#self.archive_changes+1] = change
+				local from_inner = tostring(from:strip_prefix(tmp_path))
+				local to_inner = tostring(to:strip_prefix(tmp_path))
+
+				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs+1] = from_inner
+				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs+1] = to_inner
 			end
 		end
+
+		local tasks = {}
+		for _, task in pairs(rename_pairs) do
+			tasks[#tasks+1] = task
+		end
+
+		save_tasks(tasks)
+	end)
+
+	ps.sub("delete", function(job)
+		local tasks_per_archive = {}
+
+		for _, url in ipairs(job.urls) do
+			local archive_path = url_to_archive(url)
+
+			if archive_path ~= nil then
+				local tmp_path = st.tmp_paths[archive_path]
+				local inner_path = url:strip_prefix(tmp_path)
+
+				if tasks_per_archive[archive_path] == nil then
+					tasks_per_archive[archive_path] = {
+						type = "delete",
+						archive_path = archive_path,
+						inner_paths = {}
+					}
+				end
+
+				tasks_per_archive[archive_path].inner_paths[#tasks_per_archive[archive_path].inner_paths+1] = tostring(inner_path)
+			end
+		end
+
+		local tasks = {}
+		for _, task in pairs(tasks_per_archive) do
+			tasks[#tasks+1] = task
+		end
+
+		save_tasks(tasks)
 	end)
 end
 

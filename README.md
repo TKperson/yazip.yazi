@@ -10,11 +10,12 @@ is not supported yet.
 
 ## Installation
 
-```
+```sh
 ya pkg add TKperson/yazip
 ```
 
 * `yazi.toml`
+
 ```toml
 [plugin]
 prepend_fetchers = [
@@ -26,6 +27,7 @@ prepend_previewers = [
 ```
 
 * `keymap.toml`
+
 ```toml
 [mgr]
 prepend_keymap = [
@@ -40,5 +42,14 @@ prepend_keymap = [
 ```
 
 ## Known issues
+
 * Swapping tabs that have archived opened will break the plugin
-  * I'm unable to find a solution for this because `ps.sub` does not give any information about tabs getting swapped
+  * I'm unable to find a solution for this because `ps.sub` does not give any
+  information about tabs getting swapped
+* When creating a new tab inside of archive file, the "parent" window does not
+get rendered properly
+  * Yazip loads the "parent" window using `cx.active:history(parent_path)`,
+  however, when creating the a new tab, the history function returns `nil`
+* Does not support editing UNIX file permission bits
+  * Not sure if Yazi has a way to detect permission bits changes
+* "Parent" window does not update when inside of an archive file
