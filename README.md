@@ -1,7 +1,7 @@
 # Yazip
 
-Yazip is a plugin that gives you the ability to view and edit archive files as
-if they were directories.
+Yazip is a Yazi plugin that gives you the ability to view and edit archive
+files as if they were regular directories.
 
 Still WIP
 
