@@ -5,14 +5,20 @@ files as if they were regular directories.
 
 Still WIP
 
-Previewing archive as directory works. And only partially supports editing
-archive files. If files/directories are created inside of the archive file, it
-will not update the archive file. If files are being updated, for example,
-using vim, the archive file will also not get updated.
+What currently works:
+
+* Previewing archive as directory works.
+* partially supports editing
+  * Normal file operations like cutting, yanking, deleting, and renaming are
+  supported
+
+What doesn't work:
+
+* Add files/directories that are created inside of the archive file
+  * If files are being updated, for example, using vim, the archive file will
+  also not get updated.
 
 Opening nested archives is not supported yet.
-
-Normal file operations like cutting, yanking, deleting, and renaming are supported
 
 ## Installation
 
