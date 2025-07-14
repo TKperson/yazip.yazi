@@ -99,7 +99,6 @@ local current_state = ya.sync(function()
 end)
 
 local tasks_done = ya.sync(function(st)
-	ya.dbg("fucking tasks list", st.archive_tasks)
 	return #st.archive_tasks == 0
 end)
 
