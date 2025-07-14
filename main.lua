@@ -724,7 +724,7 @@ function M:setup(user_opts)
 	end, 1100, Header.LEFT)
 
 	local function find_archive_parent_tab(archive_path)
-		for i, path in ipairs(st.opened_archive) do
+		for i, path in pairs(st.opened_archive) do
 			if archive_path == path then
 				return i
 			end

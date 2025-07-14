@@ -58,7 +58,9 @@ prepend_keymap = [
 an archive file
   * I'm not sure if Yazi plugin system has a way to detect changes made inside
   of a directory.
-* Swapping tabs that have archived opened will break the plugin
+* Swapping tabs that have different archive files opened will break the plugin
+  * reproduce steps: get inside of one archive -> new tab -> leave archive ->
+  swap tab
   * I'm unable to find a solution for this because `ps.sub` does not give any
   information about tabs getting swapped
 * parent window not does not update when viewing it inside of an archive file
