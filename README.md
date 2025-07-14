@@ -75,9 +75,6 @@ an archive file
   information about tabs getting swapped
 * parent window not does not update when viewing it inside of an archive file
   * Not sure if Yazi plugin system allows a directory to watch for changes.
-* when leaving the archive that is opened in a new tab, cursor does not hover
-over the archive file
-  * I couldn't find a way to control which file the cursor to hover over.
 * Does not support editing UNIX file permission bits
   * Not sure if Yazi has a way to detect permission bits changes
 * Yanking files to archive files don't work

@@ -758,7 +758,7 @@ function M:setup(user_opts)
 		if cwd_path == get_yazip_dir() then
 			local archive_path = get_opened_archive(job.tab)
 			if archive_path ~= nil then
-				ya.emit("cd", { Url(archive_path).parent })
+				ya.emit("reveal", { archive_path })
 			else
 				ya.err("The archive path is nil when exiting on tab #" .. tostring(job.tab))
 			end
