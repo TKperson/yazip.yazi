@@ -17,8 +17,7 @@ What doesn't work:
 * Add files/directories that are created inside of the archive file
   * If files are being updated, for example, using vim, the archive file will
   also not get updated.
-
-Opening nested archives is not supported yet.
+* Opening nested archives is not supported yet.
 
 ## Installation
 
