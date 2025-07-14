@@ -790,13 +790,16 @@ function M:setup(user_opts)
 
 		local tasks = {}
 
-		for _, url in pairs(cx.yanked) do
-			local archive_path = url_to_archive(url)
-			if archive_path ~= nil then
-				local tmp_path = st.tmp_paths[archive_path]
-				tasks[#tasks+1] = {type = "update", archive_path = archive_path, update_path = tmp_path}
-			end
-		end
+		-- TODO: handle yanked files. cx.yanked only tells me information about the file is yanked from not where the file is yanked to
+
+		-- for _, from in pairs(cx.yanked) do
+		-- 	local archive_path = url_to_archive(from)
+		-- 	if archive_path ~= nil then
+		-- 		local tmp_path = st.tmp_paths[archive_path]
+		-- 		tasks[#tasks+1] = {type = "extract", archive_path = archive_path, inner_paths = { tostring(from:strip_prefix(tmp_path)) }}
+		-- 		tasks[#tasks+1] = {type = "update", archive_path = archive_path, update_path = tmp_path}
+		-- 	end
+		-- end
 
 		save_tasks(tasks)
 	end)

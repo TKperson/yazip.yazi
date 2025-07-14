@@ -9,7 +9,7 @@ What currently works:
 
 * Previewing archive as directory works.
 * partially supports editing
-  * Normal file operations like cutting, yanking, deleting, and renaming are
+  * Normal file operations like cutting, deleting, and renaming are
   supported
 
 What doesn't work:
@@ -18,6 +18,7 @@ What doesn't work:
   * If files are being updated, for example, using vim, the archive file will
   also not get updated.
 * Opening nested archives is not supported yet.
+* Yanking
 
 ## Installation
 
@@ -79,3 +80,6 @@ over the archive file
   * I couldn't find a way to control which file the cursor to hover over.
 * Does not support editing UNIX file permission bits
   * Not sure if Yazi has a way to detect permission bits changes
+* Yanking files to archive files don't work
+  * `cx.yanked` only provides information about where files are yanked from not
+  where files are yanked to.
