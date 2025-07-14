@@ -25,6 +25,15 @@ What doesn't work:
 ya pkg add TKperson/yazip
 ```
 
+* `init.lua`
+```lua
+require("yazip"):setup{
+	show_hovered = false,
+	archive_indicator_icon = "  ",
+	archive_indicator_color = "#ECA517",
+}
+```
+
 * `yazi.toml`
 
 ```toml
