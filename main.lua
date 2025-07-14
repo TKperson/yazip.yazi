@@ -45,8 +45,40 @@ local function random_string(length)
 	return res
 end
 
--- ya.sync --
+local function by_parent_path(a, b)
+	return tostring(Url(a).parent) < tostring(Url(b).parent)
+end
 
+local function fill_directories(paths, order)
+	table.sort(order, by_parent_path)
+
+	local to_be_inserted = {}
+	for i, path in ipairs(order) do
+		local parent = Url(path).parent
+		while true do
+			if parent == nil or tostring(parent) == "" then
+				break
+			end
+
+			local parent_path = tostring(parent)
+			if paths[parent_path] == nil then
+				paths[parent_path] = { size = 0, attr = "D", extracted = false, listed = false }
+				to_be_inserted[#to_be_inserted+1] = {index = i, dir = parent_path}
+			else
+				break
+			end
+
+			parent = parent.parent
+		end
+	end
+
+	for i = #to_be_inserted, 1, -1 do
+		local item = to_be_inserted[i]
+		table.insert(order, item.index, item.dir)
+	end
+end
+
+-- ya.sync --
 local current_state = ya.sync(function()
 	local h = cx.active.current.hovered
 	local selected = {}
@@ -64,6 +96,18 @@ local current_state = ya.sync(function()
 		active_tab = cx.tabs.idx,
 		selected = selected,
 	}
+end)
+
+local tasks_begin = ya.sync(function(st)
+	st.tasks_done = false
+end)
+
+local tasks_finished = ya.sync(function(st)
+	st.tasks_done = true
+end)
+
+local tasks_done = ya.sync(function(st)
+	return st.tasks_done
 end)
 
 local get_session_id = ya.sync(function(st)
@@ -190,9 +234,7 @@ function SevenZip:is_encrypted(s) return s:find(" Wrong password", 1, true) or s
 function SevenZip:spawn(args)
 	local last_err = nil
 	local try = function(name)
-		-- local stdout = args[2] == "l" and Command.PIPED or Command.NULL
-		local stdout = Command.PIPED
-		local child, err = Command(name):arg(args):stdout(stdout):stderr(Command.PIPED):spawn()
+		local child, err = Command(name):arg(args):stdout(Command.PIPED):stderr(Command.PIPED):spawn()
 		if not child then
 			last_err = err
 		end
@@ -310,29 +352,6 @@ function SevenZip:delete(archive_path, inner_paths)
 	return self:execute(archive_path, { "d", archive_path, table.unpack(inner_paths) })
 end
 
-function SevenZip:do_task(task)
-	ya.dbg("doing task", task)
-	local archive_path = task.archive_path
-	-- change must always contains archive_path and type
-	local output
-	if task.type == "rename" then
-		output = self:rename(archive_path, task.inner_pairs)
-	elseif task.type == "extract" then
-		output = self:extract_only(archive_path, task.destination, task.inner_paths)
-	elseif task.type == "update" then
-		output = self:update(archive_path, task.update_path)
-	elseif task.type == "delete" then
-		output = self:delete(archive_path, task.inner_paths)
-	else
-		ya.err("unsupported change type", task.archive_path, task.type)
-		return
-	end
-
-	if output then
-		ya.dbg("output log", output.status.code, output.stdout, output.stderr)
-	end
-end
-
 -- commands --
 local function extract_all()
 	local st = current_state()
@@ -396,6 +415,101 @@ local function extract_hovered_selected()
 	notify(finish_msg)
 end
 
+function do_task(task)
+	ya.dbg("doing task", task)
+	local archive_path = task.archive_path
+	local current_paths, current_order = table.unpack(get_archive_files(archive_path))
+
+	-- change must always contains archive_path and type
+	local output
+	if task.type == "rename" then
+		output = SevenZip:rename(archive_path, task.inner_pairs)
+		if not output then
+			return
+		end
+
+		for i = 1, #task.inner_pairs, 2 do
+			local from = task.inner_pairs[i]
+			local to = task.inner_pairs[i + 1]
+
+			current_paths[to] = current_paths[from]
+			current_paths[from] = nil
+			for j, path in ipairs(current_order) do
+				if path == from then
+					current_order[j] = to
+					break
+				end
+			end
+		end
+
+		set_archive_files(current_paths, current_order)
+	elseif task.type == "extract" then
+		output = SevenZip:extract_only(archive_path, task.destination, task.inner_paths)
+		if not output then
+			return
+		end
+
+		-- dont need to handle anything because delete and update will handle everything
+	elseif task.type == "update" then
+		-- TODO: maybe find a way to make this more efficient?
+		output = SevenZip:update(archive_path, task.update_path)
+		if not output then
+			return
+		end
+
+		local paths, order = SevenZip:list_paths(archive_path)
+		if paths == nil or order == nil then
+			return
+		end
+
+		fill_directories(paths, order)
+		for _, path in ipairs(order) do
+			if current_paths[path] == nil then
+				paths[path].listed = true
+				paths[path].extracted = true
+			else
+				paths[path] = current_paths[path]
+			end
+		end
+
+		set_archive_files(paths, order)
+	elseif task.type == "delete" then
+		output = SevenZip:delete(archive_path, task.inner_paths)
+		if not output then
+			return
+		end
+
+		for _, inner_path in ipairs(task.inner_paths) do
+			current_paths[inner_path] = nil
+			for i, path in ipairs(current_order) do
+				if path == inner_path then
+					table.remove(current_order, i)
+					break
+				end
+			end
+		end
+
+		set_archive_files(current_paths, current_order)
+	else
+		ya.err("unsupported change type", task.archive_path, task.type)
+		return
+	end
+
+	if output then
+		ya.dbg("output log", output.status.code, output.stdout, output.stderr)
+	end
+end
+
+local function wait_for_tasks()
+	while true do
+		if tasks_done() then
+			break
+		end
+
+		ya.sleep(0.1)
+	end
+end
+
 local function handle_commands(args, st)
 	if args[1] == "extract" and is_yazip_path(st.hovered_path) and get_opened_archive(st.active_tab) ~= nil then
 		if args.all then
@@ -404,10 +518,12 @@ local function handle_commands(args, st)
 			extract_hovered_selected()
 		end
 	elseif args[1] == "do_tasks" then
+		tasks_begin()
 		local tasks = get_archive_tasks()
 		for _, task in ipairs(tasks) do
-			SevenZip:do_task(task)
+			do_task(task)
 		end
+		tasks_finished()
 	elseif args[1] == "quit" then
 		local archive_path = get_opened_archive(st.active_tab)
 		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
@@ -423,39 +539,6 @@ local function handle_commands(args, st)
 	end
 end
 
-local function by_parent_path(a, b)
-	return tostring(Url(a).parent) < tostring(Url(b).parent)
-end
-
-local function fill_directories(paths, order)
-	table.sort(order, by_parent_path)
-
-	local to_be_inserted = {}
-	for i, path in ipairs(order) do
-		local parent = Url(path).parent
-		while true do
-			if parent == nil or tostring(parent) == "" then
-				break
-			end
-
-			local parent_path = tostring(parent)
-			if paths[parent_path] == nil then
-				paths[parent_path] = { size = 0, attr = "D", extracted = false, listed = false }
-				to_be_inserted[#to_be_inserted+1] = {index = i, dir = parent_path}
-			else
-				break
-			end
-
-			parent = parent.parent
-		end
-	end
-
-	for i = #to_be_inserted, 1, -1 do
-		local item = to_be_inserted[i]
-		table.insert(order, item.index, item.dir)
-	end
-end
-
 -- yazi entries --
 local M = {}
 
@@ -468,6 +551,8 @@ function M:entry(job)
 	end
 
 	if is_supported(st.mime) then
+		wait_for_tasks()
+
 		ya.dbg("Opening archive")
 		local paths, order = table.unpack(get_archive_files(st.hovered_path))
 
@@ -537,7 +622,7 @@ function M:entry(job)
 	end
 end
 
-function M:setup()
+function M:setup(user_opts)
 	local st = self
 	st.session_id = random_string(5)
 	st.tmp_paths = {}
@@ -546,6 +631,22 @@ function M:setup()
 	st.archive_files_order = {}
 	st.saved_passwords = {}
 	st.archive_tasks = {}
+	st.tasks_done = false
+
+	-- default opts
+	local opts = {
+		show_hovered = false,
+		archive_indicator_icon = "  ",
+		archive_indicator_color = "#ECA517",
+	}
+
+	if user_opts == nil then
+		user_opts = {}
+	end
+
+	for opt, value in pairs(user_opts) do
+		opts[opt] = value
+	end
 
 	local previous_tab_length = 1
 	local last_tab_idx = 1
@@ -587,7 +688,7 @@ function M:setup()
 		if #tasks > 0 then
 			-- extends st.archive_tasks with tasks
 			for i = 1, #tasks do
-			  st.archive_tasks[#st.archive_tasks+1] = tasks[i]
+				st.archive_tasks[#st.archive_tasks+1] = tasks[i]
 			end
 			ya.emit("plugin", {self._id , "do_tasks"})
 		end
@@ -599,13 +700,13 @@ function M:setup()
 			return ""
 		end
 
-		local cwd = tostring(self._current.cwd)
-		local archive_path = get_opened_archive(cx.tabs.idx)
+		local cwd = self._current.cwd
+		local archive_path = url_to_archive(cwd)
 		local s
-		if is_yazip_path(cwd) and archive_path ~= nil then
+		if archive_path ~= nil then
 			s = ya.readable_path(archive_path)
 		else
-			s = ya.readable_path(cwd) .. self:flags()
+			s = ya.readable_path(tostring(cwd)) .. self:flags()
 		end
 		return ui.Span(ya.truncate(s, { max = max, rtl = true })):style(th.mgr.cwd)
 	end
@@ -615,31 +716,40 @@ function M:setup()
 		local archive_path = url_to_archive(cwd)
 		local s = ""
 		if archive_path ~= nil then
-			if self._current.hovered == nil then
+			if self._current.hovered == nil or not opts.show_hovered then
 				local tmp_path = st.tmp_paths[archive_path]
 				local inner_archive_path = cwd:strip_prefix(tmp_path)
-				s = "  " .. inner_archive_path .. self:flags()
+				s =  opts.archive_indicator_icon .. inner_archive_path .. self:flags()
 			else
 				local h_url = tostring(self._current.hovered.url)
 				local inner_archive_path = h_url:sub(#get_tmp_path(archive_path) + 2, #h_url)
-				s = "  " .. inner_archive_path .. self:flags()
+				s = opts.archive_indicator_icon .. inner_archive_path .. self:flags()
 			end
 		end
-		return ui.Span(s):fg("#ECA517")
+		return ui.Span(s):fg(opts.archive_indicator_color)
 	end, 1100, Header.LEFT)
+
+	local function find_archive_parent_tab(archive_path)
+		for i, path in ipairs(st.opened_archive) do
+			if archive_path == path then
+				return i
+			end
+		end
+	end
 
 	local old_new = Parent.new
 	function Parent:new(area, tab)
-		local archive_path = get_opened_archive(cx.tabs.idx)
+		local archive_path = url_to_archive(cx.active.current.cwd)
 		local cwd_path = tostring(cx.active.current.cwd)
 
-		if is_yazip_path(cwd_path) and archive_path ~= nil and not two_deep(archive_path, cwd_path) then
+		if archive_path ~= nil and not two_deep(archive_path, cwd_path) then
 			local url = Url(archive_path).parent
-			local parent = cx.active:history(url)
+			local tab_index = find_archive_parent_tab(archive_path)
+			-- FIXME: correct the hovering position when exiting the archive file
+			local parent = cx.tabs[tab_index]:history(url)
 			if parent then
 				tab = { parent = parent }
 			else
-				-- FIXME: handle cx.active:history(url) when it returns nil
 				ya.err("Unable to render the correct parent window")
 			end
 		end
@@ -661,6 +771,11 @@ function M:setup()
 		end
 	end)
 
+	ps.sub("load", function(job)
+		-- detect new files/folders
+		-- ya.dbg("load job", job)
+	end)
+
 	-- FIXME: handle tab swapping
 	ps.sub("tab", function(job)
 		if previous_tab_length ~= #cx.tabs and is_yazip_path(tostring(cx.active.current.cwd)) then
@@ -668,7 +783,6 @@ function M:setup()
 				insert(st.opened_archive, job.idx, st.opened_archive[job.idx - 1])
 			elseif previous_tab_length > #cx.tabs then
 				remove(st.opened_archive, last_tab_idx)
-				st.opened_archive[#st.opened_archive+1] = nil
 			end
 		end
 		last_tab_idx = job.idx
