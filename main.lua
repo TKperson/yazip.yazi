@@ -98,16 +98,13 @@ local current_state = ya.sync(function()
 	}
 end)
 
-local tasks_begin = ya.sync(function(st)
-	st.tasks_done = false
-end)
-
-local tasks_finished = ya.sync(function(st)
-	st.tasks_done = true
-end)
-
 local tasks_done = ya.sync(function(st)
-	return st.tasks_done
+	ya.dbg("fucking tasks list", st.archive_tasks)
+	return #st.archive_tasks == 0
+end)
+
+local clear_tasks = ya.sync(function(st)
+	st.archive_tasks = {}
 end)
 
 local get_session_id = ya.sync(function(st)
@@ -518,12 +515,11 @@ local function handle_commands(args, st)
 			extract_hovered_selected()
 		end
 	elseif args[1] == "do_tasks" then
-		tasks_begin()
 		local tasks = get_archive_tasks()
 		for _, task in ipairs(tasks) do
 			do_task(task)
 		end
-		tasks_finished()
+		clear_tasks()
 	elseif args[1] == "quit" then
 		local archive_path = get_opened_archive(st.active_tab)
 		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
@@ -631,7 +627,6 @@ function M:setup(user_opts)
 	st.archive_files_order = {}
 	st.saved_passwords = {}
 	st.archive_tasks = {}
-	st.tasks_done = false
 
 	-- default opts
 	local opts = {

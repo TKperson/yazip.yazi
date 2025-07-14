@@ -12,7 +12,7 @@ using vim, the archive file will also not get updated.
 
 Opening nested archives is not supported yet.
 
-Normal file operations like cutting, yanking, deleting, and renaming
+Normal file operations like cutting, yanking, deleting, and renaming are supported
 
 ## Installation
 
@@ -49,11 +49,17 @@ prepend_keymap = [
 
 ## Known issues
 
+* No support for editing existing files or add new files/directories inside of
+an archive file
+  * I'm not sure if Yazi plugin system has a way to detect changes made inside
+  of a directory.
 * Swapping tabs that have archived opened will break the plugin
   * I'm unable to find a solution for this because `ps.sub` does not give any
   information about tabs getting swapped
 * parent window not does not update when viewing it inside of an archive file
-* when leaving the archive that is opened in a new tab, cursor does not hover over the archive file
+  * Not sure if Yazi plugin system allows a directory to watch for changes.
+* when leaving the archive that is opened in a new tab, cursor does not hover
+over the archive file
+  * I couldn't find a way to control which file the cursor to hover over.
 * Does not support editing UNIX file permission bits
   * Not sure if Yazi has a way to detect permission bits changes
-* "Parent" window does not update when inside of an archive file
