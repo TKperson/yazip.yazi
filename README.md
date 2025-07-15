@@ -59,6 +59,7 @@ prepend_keymap = [
   { on = ["l"], run = "plugin yazip",                               desc = "Enter archive with Yazip" }, 
   { on = ["e"], run = 'plugin yazip -- extract --hovered-selected', desc = "Extract selected or hovered inside of Yazip" },
   { on = ["E"], run = 'plugin yazip -- extract --all',              desc = "Extract everything inside of Yazip" },
+  { on = ["U"], run = 'plugin yazip -- manual_update',              desc = "Sync changes to archive file manually" },
 ]
 ```
 

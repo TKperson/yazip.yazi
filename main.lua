@@ -98,6 +98,10 @@ local current_state = ya.sync(function()
 	}
 end)
 
+local get_archive_tasks = ya.sync(function(st)
+	return st.archive_tasks
+end)
+
 local tasks_done = ya.sync(function(st)
 	return #st.archive_tasks == 0
 end)
@@ -145,10 +149,6 @@ end)
 
 local get_archive_password = ya.sync(function(st, archive_path)
 	return st.saved_passwords[archive_path]
-end)
-
-local get_archive_tasks = ya.sync(function(st)
-	return st.archive_tasks
 end)
 
 -- helper functions --
@@ -519,9 +519,20 @@ local function handle_commands(args, st)
 			do_task(task)
 		end
 		clear_tasks()
+	elseif args[1] == "manual_update" then
+		local archive_path = get_opened_archive(st.active_tab)
+		if archive_path ~= nil and is_yazip_path(get_cwd()) then
+			local tmp_path = get_tmp_path(archive_path)
+			local task = {
+				type = "update",
+				archive_path = archive_path,
+				update_path = tmp_path,
+			}
+			do_task(task)
+		end
 	elseif args[1] == "quit" then
 		local archive_path = get_opened_archive(st.active_tab)
-		if archive_path ~= nil and is_yazip_path(st.hovered_path) then
+		if archive_path ~= nil and is_yazip_path(get_cwd()) then
 			local archive_cwd = Url(archive_path).parent
 			ya.emit("cd", { tostring(archive_cwd) })
 		end
@@ -644,6 +655,7 @@ function M:setup(user_opts)
 
 	local previous_tab_length = 1
 	local last_tab_idx = 1
+	local last_tab_id = 1
 
 	local function insert(t, pos, value)
 		if pos > #t then
@@ -739,7 +751,6 @@ function M:setup(user_opts)
 		if archive_path ~= nil and not two_deep(archive_path, cwd_path) then
 			local url = Url(archive_path).parent
 			local tab_index = find_archive_parent_tab(archive_path)
-			-- FIXME: correct the hovering position when exiting the archive file
 			local parent = cx.tabs[tab_index]:history(url)
 			if parent then
 				tab = { parent = parent }
@@ -752,13 +763,13 @@ function M:setup(user_opts)
 	end
 
 	ps.sub("cd", function(job)
-		local cwd_path = get_cwd()
-
 		-- exit
-		if cwd_path == get_yazip_dir() then
-			local archive_path = get_opened_archive(job.tab)
+		if tostring(cx.active.current.cwd) == get_yazip_dir() then
+			ya.dbg("dbug archive", st.opened_archive)
+			local archive_path = st.opened_archive[cx.tabs.idx]
 			if archive_path ~= nil then
 				ya.emit("reveal", { archive_path })
+				st.opened_archive[cx.tabs.idx] = nil
 			else
 				ya.err("The archive path is nil when exiting on tab #" .. tostring(job.tab))
 			end
@@ -771,15 +782,27 @@ function M:setup(user_opts)
 	end)
 
 	-- FIXME: handle tab swapping
-	ps.sub("tab", function(job)
+	ps.sub("tab", function(_)
+		local current_index = cx.tabs.idx
 		if previous_tab_length ~= #cx.tabs and is_yazip_path(tostring(cx.active.current.cwd)) then
 			if previous_tab_length < #cx.tabs then
-				insert(st.opened_archive, job.idx, st.opened_archive[job.idx - 1])
+				-- new tab created
+				insert(st.opened_archive, current_index, st.opened_archive[current_index - 1])
 			elseif previous_tab_length > #cx.tabs then
+				-- tab closed
 				remove(st.opened_archive, last_tab_idx)
 			end
+		elseif last_tab_id == cx.tabs[current_index].id.value then
+			-- tab swapped
+			local temp = st.opened_archive[last_tab_idx]
+			st.opened_archive[last_tab_idx] = st.opened_archive[current_index]
+			st.opened_archive[current_index] = temp
+		else
+			-- tab switched: do nothing
 		end
-		last_tab_idx = job.idx
+
+		last_tab_id = cx.tabs[current_index].id.value
+		last_tab_idx = current_index
 		previous_tab_length = #cx.tabs
 	end)
 
