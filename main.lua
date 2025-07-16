@@ -1,4 +1,4 @@
-local supported_format = { 
+local supported_format = {
 	-- only supports * which matches any character zero or more times
 	-- copied and expanded from archive.lua
 	"application/zip",
@@ -36,6 +36,10 @@ do -- [0-9a-zA-Z]
 	end
 end
 
+local function is_dir(path)
+	return string.find(path.attr, "D")
+end
+
 math.randomseed(os.time())
 local function random_string(length)
 	local res = ""
@@ -63,7 +67,7 @@ local function fill_directories(paths, order)
 			local parent_path = tostring(parent)
 			if paths[parent_path] == nil then
 				paths[parent_path] = { size = 0, attr = "D", extracted = false, listed = false }
-				to_be_inserted[#to_be_inserted+1] = {index = i, dir = parent_path}
+				to_be_inserted[#to_be_inserted + 1] = { index = i, dir = parent_path }
 			else
 				break
 			end
@@ -87,7 +91,10 @@ local current_state = ya.sync(function()
 	end
 
 	if h == nil then
-		return {}
+		return {
+			active_tab = cx.tabs.idx,
+			selected = selected,
+		}
 	end
 
 	return {
@@ -211,7 +218,7 @@ local function notify(msg, level)
 		level = "info"
 	end
 
-	ya.notify {
+	ya.notify({
 		-- Title.
 		title = "Yazip",
 		-- Content.
@@ -220,12 +227,14 @@ local function notify(msg, level)
 		timeout = 6.5,
 		-- Level, available values: "info", "warn", and "error", default is "info".
 		level = level,
-	}
+	})
 end
 
 local SevenZip = {}
 
-function SevenZip:is_encrypted(s) return s:find(" Wrong password", 1, true) or s:find("Break signaled", 1, true) end
+function SevenZip:is_encrypted(s)
+	return s:find(" Wrong password", 1, true) or s:find("Break signaled", 1, true)
+end
 
 function SevenZip:spawn(args)
 	local last_err = nil
@@ -245,16 +254,15 @@ function SevenZip:spawn(args)
 end
 
 function SevenZip:get_password(archive_path)
-	local value, event = ya.input {
+	local value, event = ya.input({
 		position = { "center", w = 50 },
 		title = string.format('Password for "%s":', Url(archive_path).name),
 		obscure = true,
-	}
+	})
 	if event == 1 then
 		return value
 	end
 end
-
 
 function SevenZip:execute(archive_path, command)
 	local pwd = get_archive_password(archive_path) or ""
@@ -276,9 +284,9 @@ function SevenZip:try_execute(command, pwd)
 	ya.dbg("trying to execute (no password included)", command)
 	local child, err
 	if pwd == "" then
-		child, err = self:spawn{ table.unpack(command) }
+		child, err = self:spawn({ table.unpack(command) })
 	else
-		child, err = self:spawn{ "-p" .. pwd, table.unpack(command) }
+		child, err = self:spawn({ "-p" .. pwd, table.unpack(command) })
 	end
 
 	local output
@@ -298,7 +306,6 @@ function SevenZip:try_execute(command, pwd)
 	end
 
 	return false, output
-
 end
 
 function SevenZip:extract(archive_path, destination, inner_paths)
@@ -307,7 +314,7 @@ function SevenZip:extract(archive_path, destination, inner_paths)
 end
 
 function SevenZip:extract_only(archive_path, destination, inner_paths)
-	local command = { "e", "-aoa",  "-o" .. destination, archive_path, table.unpack(inner_paths) }
+	local command = { "e", "-aoa", "-o" .. destination, archive_path, table.unpack(inner_paths) }
 	return self:execute(archive_path, command)
 end
 
@@ -341,7 +348,7 @@ end
 
 function SevenZip:update(archive_path, update_path)
 	-- the /./ at the end is used to set relative path to start inside of the archive path
-	return self:execute(archive_path, { "u", archive_path, update_path.."/./" })
+	return self:execute(archive_path, { "u", archive_path, update_path .. "/./" })
 end
 
 function SevenZip:delete(archive_path, inner_paths)
@@ -390,10 +397,25 @@ local function extract_hovered_selected()
 			warning = true
 			goto continue
 		end
-		-- selected_relative[#selected_relative + 1] = path:sub(#tmp_path + 2, #path)
 		selected_relative[#selected_relative + 1] = relative_path
 		local metadata = listed_paths[relative_path]
 		metadata.extracted = true
+
+		-- change extracted metadata to true for all sub files/dirs
+		if is_dir(metadata) then
+			local early_end = false
+			for _, inner_path in ipairs(order) do
+				local start, _ = inner_path:find(relative_path)
+				if start == nil and early_end then
+					break
+				end
+
+				if start == 1 then
+					metadata.extracted = true
+					early_end = true
+				end
+			end
+		end
 
 		::continue::
 	end
@@ -583,10 +605,6 @@ function M:entry(job)
 			return
 		end
 
-		local is_dir = function(path)
-			return string.find(path.attr, "D")
-		end
-
 		for _, path in ipairs(order) do
 			local metadata = paths[path]
 
@@ -664,7 +682,7 @@ function M:setup(user_opts)
 		end
 
 		for i = #t, pos, -1 do
-			t[i+1] = t[i]
+			t[i + 1] = t[i]
 		end
 
 		t[pos] = value
@@ -694,9 +712,9 @@ function M:setup(user_opts)
 		if #tasks > 0 then
 			-- extends st.archive_tasks with tasks
 			for i = 1, #tasks do
-				st.archive_tasks[#st.archive_tasks+1] = tasks[i]
+				st.archive_tasks[#st.archive_tasks + 1] = tasks[i]
 			end
-			ya.emit("plugin", {self._id , "do_tasks"})
+			ya.emit("plugin", { self._id, "do_tasks" })
 		end
 	end
 
@@ -725,7 +743,7 @@ function M:setup(user_opts)
 			if self._current.hovered == nil or not opts.show_hovered then
 				local tmp_path = st.tmp_paths[archive_path]
 				local inner_archive_path = cwd:strip_prefix(tmp_path)
-				s =  opts.archive_indicator_icon .. inner_archive_path .. self:flags()
+				s = opts.archive_indicator_icon .. inner_archive_path .. self:flags()
 			else
 				local h_url = tostring(self._current.hovered.url)
 				local inner_archive_path = h_url:sub(#get_tmp_path(archive_path) + 2, #h_url)
@@ -842,7 +860,7 @@ function M:setup(user_opts)
 				if extract_tasks[archive_path] == nil then
 					extract_tasks[archive_path] = {}
 				end
-				extract_tasks[archive_path][#extract_tasks[archive_path]+1] = {from = from, to = to}
+				extract_tasks[archive_path][#extract_tasks[archive_path] + 1] = { from = from, to = to }
 			end
 
 			if to_archive_path ~= nil then
@@ -862,27 +880,27 @@ function M:setup(user_opts)
 					notify("There should only be one destination", "error")
 					return
 				end
-				inner_paths[#inner_paths+1] = tostring(Url(location.from):strip_prefix(tmp_path))
+				inner_paths[#inner_paths + 1] = tostring(Url(location.from):strip_prefix(tmp_path))
 			end
 
-			tasks[#tasks+1] = {
+			tasks[#tasks + 1] = {
 				type = "extract",
 				archive_path = archive_path,
 				destination = tostring(Url(destination).parent),
 				inner_paths = inner_paths,
 			}
 
-			tasks[#tasks+1] = {
+			tasks[#tasks + 1] = {
 				type = "delete",
 				archive_path = archive_path,
 				inner_paths = inner_paths,
 			}
 		end
 		for archive_path, tmp_path in pairs(update_tasks) do
-			tasks[#tasks+1] = {
+			tasks[#tasks + 1] = {
 				type = "update",
 				archive_path = archive_path,
-				update_path = tmp_path
+				update_path = tmp_path,
 			}
 		end
 		save_tasks(tasks)
@@ -897,12 +915,11 @@ function M:setup(user_opts)
 			if tmp_path ~= nil then
 				local rename_pairs = {
 					tostring(job.from:strip_prefix(tmp_path)),
-					tostring(job.to:strip_prefix(tmp_path))
+					tostring(job.to:strip_prefix(tmp_path)),
 				}
-				local task = {type = "rename", archive_path = archive_path, inner_pairs = rename_pairs}
+				local task = { type = "rename", archive_path = archive_path, inner_pairs = rename_pairs }
 				save_tasks({ task })
 			end
-
 		end
 	end)
 
@@ -919,21 +936,21 @@ function M:setup(user_opts)
 					rename_pairs[archive_path] = {
 						type = "rename",
 						archive_path = archive_path,
-						inner_pairs = {}
+						inner_pairs = {},
 					}
 				end
 
 				local from_inner = tostring(from:strip_prefix(tmp_path))
 				local to_inner = tostring(to:strip_prefix(tmp_path))
 
-				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs+1] = from_inner
-				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs+1] = to_inner
+				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs + 1] = from_inner
+				rename_pairs[archive_path].inner_pairs[#rename_pairs[archive_path].inner_pairs + 1] = to_inner
 			end
 		end
 
 		local tasks = {}
 		for _, task in pairs(rename_pairs) do
-			tasks[#tasks+1] = task
+			tasks[#tasks + 1] = task
 		end
 
 		save_tasks(tasks)
@@ -953,17 +970,18 @@ function M:setup(user_opts)
 					tasks_per_archive[archive_path] = {
 						type = "delete",
 						archive_path = archive_path,
-						inner_paths = {}
+						inner_paths = {},
 					}
 				end
 
-				tasks_per_archive[archive_path].inner_paths[#tasks_per_archive[archive_path].inner_paths+1] = tostring(inner_path)
+				tasks_per_archive[archive_path].inner_paths[#tasks_per_archive[archive_path].inner_paths + 1] =
+					tostring(inner_path)
 			end
 		end
 
 		local tasks = {}
 		for _, task in pairs(tasks_per_archive) do
-			tasks[#tasks+1] = task
+			tasks[#tasks + 1] = task
 		end
 
 		save_tasks(tasks)
