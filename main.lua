@@ -346,9 +346,14 @@ function SevenZip:rename(archive_path, rename_pairs)
 	return self:execute(archive_path, { "rn", archive_path, table.unpack(rename_pairs) })
 end
 
-function SevenZip:update(archive_path, update_path)
+function SevenZip:update(archive_path, update_path, exclude_paths)
+	local exclude_flags = {}
+	for _, inner_path in ipairs(exclude_paths) do
+		exclude_flags[#exclude_flags + 1] = "-x!" .. inner_path
+	end
+
 	-- the /./ at the end is used to set relative path to start inside of the archive path
-	return self:execute(archive_path, { "u", archive_path, update_path .. "/./" })
+	return self:execute(archive_path, { "u", archive_path, update_path .. "/./", table.unpack(exclude_flags) })
 end
 
 function SevenZip:delete(archive_path, inner_paths)
@@ -470,7 +475,18 @@ function do_task(task)
 		-- dont need to handle anything because delete and update will handle everything
 	elseif task.type == "update" then
 		-- TODO: maybe find a way to make this more efficient?
-		output = SevenZip:update(archive_path, task.update_path)
+
+		-- stops 7z from using unextracted empty files for updates
+		local exclude_paths = {}
+		for _, path in ipairs(current_order) do
+			local metadata = current_paths[path]
+
+			if (not metadata.extracted or not metadata.listed) and not is_dir(metadata) then
+				exclude_paths[#exclude_paths + 1] = path
+			end
+		end
+
+		output = SevenZip:update(archive_path, task.update_path, exclude_paths)
 		if not output then
 			return
 		end
@@ -822,27 +838,6 @@ function M:setup(user_opts)
 		last_tab_id = cx.tabs[current_index].id.value
 		last_tab_idx = current_index
 		previous_tab_length = #cx.tabs
-	end)
-
-	ps.sub("@yank", function()
-		if cx.yanked.is_cut then
-			return -- handled in `ps.sub("move", callback)`
-		end
-
-		local tasks = {}
-
-		-- TODO: handle yanked files. cx.yanked only tells me information about the file is yanked from not where the file is yanked to
-
-		-- for _, from in pairs(cx.yanked) do
-		-- 	local archive_path = url_to_archive(from)
-		-- 	if archive_path ~= nil then
-		-- 		local tmp_path = st.tmp_paths[archive_path]
-		-- 		tasks[#tasks+1] = {type = "extract", archive_path = archive_path, inner_paths = { tostring(from:strip_prefix(tmp_path)) }}
-		-- 		tasks[#tasks+1] = {type = "update", archive_path = archive_path, update_path = tmp_path}
-		-- 	end
-		-- end
-
-		save_tasks(tasks)
 	end)
 
 	ps.sub("move", function(job)
