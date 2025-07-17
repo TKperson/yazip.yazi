@@ -308,8 +308,12 @@ function SevenZip:try_execute(command, pwd)
 	return false, output
 end
 
-function SevenZip:extract(archive_path, destination, inner_paths)
+function SevenZip:extract(archive_path, destination, inner_paths, exclude_paths)
 	local command = { "x", "-aoa", "-o" .. destination, archive_path, table.unpack(inner_paths) }
+
+	for _, inner_path in ipairs(exclude_paths) do
+		command[#command + 1] = "-x!" .. inner_path
+	end
 	return self:execute(archive_path, command)
 end
 
@@ -365,16 +369,22 @@ local function extract_all()
 	local st = current_state()
 	local archive_path = get_opened_archive(st.active_tab)
 	local yazip_path = get_tmp_path(archive_path)
-	local output = SevenZip:extract(archive_path, yazip_path, {})
+	local paths, order = table.unpack(get_archive_files(archive_path))
+
+	-- prevent extracting the same file twice
+	local exclude_paths = {}
+	for inner_path, metadata in pairs(paths) do
+		if not is_dir(metadata) and metadata.extracted then
+			exclude_paths[#exclude_paths + 1] = inner_path
+		end
+		metadata.extracted = true
+	end
+	local output = SevenZip:extract(archive_path, yazip_path, {}, exclude_paths)
 
 	if not output then
 		return -- user didn't enter password
 	end
 
-	local paths, order = table.unpack(get_archive_files(archive_path))
-	for _, metadata in pairs(paths) do
-		metadata.extracted = true
-	end
 	set_archive_files(archive_path, paths, order)
 
 	notify("Finished extracting all archive files")
@@ -385,6 +395,7 @@ local function extract_hovered_selected()
 	local archive_path = get_opened_archive(st.active_tab)
 	local tmp_path = get_tmp_path(archive_path)
 	local selected_relative = {}
+	local exclude_paths = {}
 	local listed_paths, order = table.unpack(get_archive_files(archive_path))
 
 	local warning = false
@@ -404,6 +415,13 @@ local function extract_hovered_selected()
 		end
 		selected_relative[#selected_relative + 1] = relative_path
 		local metadata = listed_paths[relative_path]
+
+		-- prevent extracting the same file twice
+		if not is_dir(metadata) and metadata.extracted then
+			exclude_paths[#exclude_paths + 1] = relative_path
+			goto continue
+		end
+
 		metadata.extracted = true
 
 		-- change extracted metadata to true for all sub files/dirs
@@ -429,7 +447,7 @@ local function extract_hovered_selected()
 		notify("Non-yazip files in the selection are ignored", "warn")
 	end
 
-	local output = SevenZip:extract(archive_path, tmp_path, selected_relative)
+	local output = SevenZip:extract(archive_path, tmp_path, selected_relative, exclude_paths)
 	if not output then
 		return -- user didn't enter password
 	end
@@ -481,6 +499,7 @@ function do_task(task)
 		for _, path in ipairs(current_order) do
 			local metadata = current_paths[path]
 
+			-- TODO: handle cases where user replace unextracted file
 			if (not metadata.extracted or not metadata.listed) and not is_dir(metadata) then
 				exclude_paths[#exclude_paths + 1] = path
 			end
